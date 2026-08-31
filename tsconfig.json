@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/localization" },
+    { "path": "packages/agent-core" },
+    { "path": "packages/webmcp-bridge" },
+    { "path": "packages/buddy-ui" },
+    { "path": "apps/playground" },
+    { "path": "apps/extension" }
+  ]
+}

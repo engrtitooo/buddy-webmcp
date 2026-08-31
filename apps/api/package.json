@@ -1,0 +1,1 @@
+{"name":"@buddy/api","private":true,"type":"module","scripts":{"build":"esbuild src/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.js","start":"node dist/server.js"},"dependencies":{"@buddy/agent-core":"*","@buddy/shared":"*"},"devDependencies":{"esbuild":"^0.28.2"}}

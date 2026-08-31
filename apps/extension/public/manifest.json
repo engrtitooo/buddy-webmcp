@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Buddy — Your Agentic Web Companion",
+  "short_name": "Buddy",
+  "version": "0.1.0",
+  "description": "The friendly interface for the agentic web.",
+  "permissions": ["storage"],
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["content.js"],
+    "css": ["content.css"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }]
+}

@@ -1,0 +1,23 @@
+export interface Product { id:string; name:string; category:string; price:number; rating:number; deliveryDay:string; deliveryOrder:number; description:string; stock:number; attributes:string[]; tone:string }
+export const products: Product[] = [
+  ['p01','Drift Mini Speaker','Audio',39,4.8,'Wednesday',3,'Pocket-sized sound with a warm, balanced profile.',18,['Bluetooth','12h battery'],'#d8b980'],
+  ['p02','Halo Reading Light','Home',28,4.7,'Tuesday',2,'A calm bedside light with touch dimming.',32,['USB-C','Warm light'],'#d5a892'],
+  ['p03','Field Notes Gift Set','Stationery',24,4.9,'Monday',1,'Three linen notebooks and a brass bookmark.',25,['Recycled paper','Gift box'],'#a4b799'],
+  ['p04','QuietCloud Headphones','Audio',89,4.8,'Thursday',4,'Comfortable over-ear headphones for focused listening.',14,['ANC','30h battery'],'#9daebf'],
+  ['p05','Arc Wireless Earbuds','Audio',69,4.6,'Wednesday',3,'Compact earbuds with clear calls and a pocket case.',21,['IPX5','24h total'],'#aa9eb6'],
+  ['p06','Mori Tea Ritual Kit','Kitchen',46,4.9,'Wednesday',3,'Stoneware cup, infuser, and three botanical teas.',11,['Stoneware','Caffeine-free'],'#8ca68f'],
+  ['p07','Orbit Desk Clock','Home',42,4.5,'Friday',5,'Silent analog clock with a softly weighted base.',9,['Silent sweep','Aluminum'],'#b5a98c'],
+  ['p08','Fold Travel Pouch','Travel',34,4.7,'Tuesday',2,'Organized storage for cables, passport, and essentials.',44,['Water resistant','6 pockets'],'#b29c88'],
+  ['p09','Sora Pour-Over Set','Kitchen',58,4.8,'Thursday',4,'A compact ceramic brewer for one thoughtful cup.',8,['Ceramic','Reusable filter'],'#b98e78'],
+  ['p10','Pebble Power Bank','Tech',37,4.6,'Monday',1,'A slim everyday battery with fast USB-C charging.',37,['10000mAh','USB-C PD'],'#849ba2'],
+  ['p11','Lumen Candle Pair','Home',31,4.9,'Wednesday',3,'Two clean-burning candles with cedar and fig notes.',20,['Soy wax','40h each'],'#bf9b78'],
+  ['p12','Atlas Card Game','Games',19,4.7,'Tuesday',2,'A quick travel game about curious places.',53,['2–6 players','15 minutes'],'#9aac86'],
+  ['p13','Mellow Sleep Mask','Wellness',22,4.8,'Monday',1,'A soft, light-blocking mask with an adjustable band.',41,['Washable','Memory foam'],'#9c94ae'],
+  ['p14','Studio Pen Duo','Stationery',36,4.6,'Thursday',4,'Balanced rollerball pens in a presentation case.',16,['Refillable','Gift case'],'#6f8794'],
+  ['p15','Echo Clip Speaker','Audio',29,4.4,'Tuesday',2,'A rugged clip-on speaker for walks and weekends.',29,['IP67','10h battery'],'#c38d6f'],
+  ['p16','Cloud Knit Scarf','Style',48,4.8,'Wednesday',3,'A soft recycled-knit scarf in a versatile neutral.',12,['Recycled fiber','Unisex'],'#aaa29a'],
+  ['p17','Little Grove Planter','Home',27,4.7,'Friday',5,'A self-watering ceramic planter for small herbs.',17,['Self-watering','Ceramic'],'#819b82'],
+  ['p18','Trail Coffee Flask','Travel',33,4.6,'Thursday',4,'Leakproof insulated flask sized for daily carry.',36,['12h hot','BPA-free'],'#8e988d'],
+  ['p19','Muse Pocket Projector','Tech',96,4.5,'Wednesday',3,'A tiny projector for cozy movie nights.',6,['1080p input','2h battery'],'#7e879f'],
+  ['p20','Kindred Photo Stand','Home',18,4.9,'Monday',1,'A solid oak photo stand with five print cards.',47,['FSC oak','5 cards'],'#b48c67'],
+].map(([id,name,category,price,rating,deliveryDay,deliveryOrder,description,stock,attributes,tone]) => ({ id,name,category,price,rating,deliveryDay,deliveryOrder,description,stock,attributes,tone } as Product));
