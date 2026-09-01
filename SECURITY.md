@@ -15,15 +15,18 @@ The webpage, tool names, descriptions, schemas, and results are untrusted. The e
 ## Controls
 
 - Isolated Manifest V3 content script and closed Shadow DOM
+- Styles are embedded in the closed Shadow DOM; page CSS cannot restyle Buddy's trusted approval UI
+- A least-privilege service worker owns the single build-time API origin; content scripts cannot choose a destination
 - No page-visible bridge, `window.postMessage` RPC, or privileged extension API exposure
 - Explicit WebMCP feature detection and allowed methods
 - Native `RegisteredTool` objects never serialized to page code
 - Execution only when the reviewed tool-set revision is still current
 - Tool descriptions are treated as data; the remote planner is instructed to ignore embedded instructions
-- Server and client validate every planned tool name and recompute risk from the current tool definition
+- Server and client validate every selected tool name, and Ajv validates arguments against the site's current JSON Schema before execution
+- One-action iterations, a ten-turn ceiling, duplicate-call detection, abort propagation, and revision checks bound agent autonomy
 - Consequential risk classes require approval by default; deletion is blocked by default
 - Cancel never invokes the gated tool
-- No API key in browser code; loopback-only default, exact CORS allowlist, originless-request denial, bounded inputs, and per-client rate limiting on the proxy
+- No API key in browser code; loopback-only default, exact CORS allowlist, originless-request denial, bounded inputs, provider timeouts, request IDs, safe logs, an auth-verifier interface, and replaceable per-client rate limiting on the proxy
 - No full-page capture, browsing history, cookies, or hidden DOM automation
 - Developer diagnostics are opt-in and not persisted
 
@@ -31,7 +34,7 @@ The webpage, tool names, descriptions, schemas, and results are untrusted. The e
 
 WebMCP annotations are hints supplied by an untrusted site, so Buddy does not let `readOnlyHint` override obviously consequential names. A malicious site can still lie in its implementation or return adversarial text; users should judge the current site identity shown in Buddy's header. Model prompt-injection defenses reduce but cannot eliminate probabilistic model risk, so provider output is runtime-validated and approval remains a deterministic layer outside the model.
 
-The optional model proxy is safe for local development by default. Do not expose it directly to the public internet: place public deployments behind authenticated infrastructure with durable distributed rate limits and provider-usage monitoring.
+The optional model proxy is safe for local development by default. Its in-memory limiter is not a distributed production control. Do not expose it directly to the public internet: place public deployments behind authenticated infrastructure with durable distributed rate limits, abuse controls, TLS, secret storage, and provider-usage monitoring.
 
 ## Reporting
 

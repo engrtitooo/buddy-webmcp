@@ -80,8 +80,67 @@ export interface PendingApproval {
   step: PlanStep;
   what: string;
   why: string;
-  dataSummary: string;
+  argumentsJson: string;
+  site: string;
+  risk: RiskCategory;
 }
+
+export interface AgentObservation {
+  callId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  outcome: 'success' | 'error' | 'canceled';
+  result?: unknown;
+  error?: string;
+}
+
+export interface AgentNextInput {
+  sessionId: string;
+  turn: number;
+  goal: string;
+  tools: WebMCPTool[];
+  observations: AgentObservation[];
+}
+
+export type AgentDecision =
+  | {
+      kind: 'tool_call';
+      callId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+      label: string;
+      reason: string;
+      risk: RiskCategory;
+    }
+  | { kind: 'final'; message: string }
+  | { kind: 'needs_input'; message: string };
+
+export const AGENT_NEXT_MESSAGE = 'buddy.agent.next' as const;
+
+export interface AgentNextRuntimeMessage {
+  type: typeof AGENT_NEXT_MESSAGE;
+  payload: AgentNextInput;
+}
+
+export interface AgentRuntimeError {
+  code: 'BAD_REQUEST' | 'UNAVAILABLE' | 'TIMEOUT' | 'RATE_LIMITED' | 'PROVIDER_ERROR';
+  message: string;
+  retryable: boolean;
+}
+
+export type AgentNextRuntimeResponse =
+  | { ok: true; requestId: string; decision: AgentDecision }
+  | { ok: false; requestId: string; error: AgentRuntimeError };
+
+export const AGENT_LIMITS = {
+  maxGoalLength: 2_000,
+  maxTools: 64,
+  maxObservations: 12,
+  maxTurns: 10,
+  maxPayloadBytes: 100_000,
+  maxSchemaBytes: 10_000,
+  maxResultCharacters: 4_000,
+} as const;
 
 export type BuddyState =
   | 'SLEEPING'

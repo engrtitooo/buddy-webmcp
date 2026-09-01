@@ -4,21 +4,21 @@
 
 ### WebMCP layer
 
-`WebMCPAdapter` is the only component that discovers or invokes page tools. It keeps native `RegisteredTool` objects private, exposes plain metadata to the application, refreshes on `toolchange`, and rejects execution when a tool disappeared. The Playground uses `registerTools` to register narrowly scoped tools with individual abort signals.
+`WebMCPAdapter` is the only component that discovers or invokes page tools. It keeps native `RegisteredTool` objects private, exposes bounded plain metadata to the application, refreshes on `toolchange`, polls defensively for SPA/API lifecycle changes, and rejects execution when the reviewed inventory revision changed. The Playground uses `registerTools` to register narrowly scoped tools with individual abort signals.
 
 No generic DOM click, type, or scrape primitives exist.
 
 ### Agent layer
 
-`AgentProvider` separates intent interpretation from execution. `MockAgentProvider` is deterministic and local. `RemoteAgentProvider` talks only to the server proxy. Plans contain explicit tool names, arguments, labels, and risk categories; the executor refuses tools that are no longer available.
+`AgentProvider` selects one next action at a time. The loop is `next decision → validate → permission → execute one tool → observe → repeat/final`. It is capped at ten turns, rejects repeated identical calls, propagates cancellation, and binds every call to one WebMCP inventory revision. `MockAgentProvider` is deterministic for tests and demos. The production extension always uses `ExtensionAgentProvider`, which can reach the configured API only through the Manifest V3 service worker.
 
 ### Safety layer
 
-`CapabilityMapper` turns names and descriptions into grouped consumer capabilities. `PermissionEngine` combines classified risk with local rules and returns `ALLOW`, `ASK`, or `BLOCK`. The UI owns the paused plan cursor, so approval resumes precisely after the gated step.
+`CapabilityMapper` turns names and descriptions into grouped consumer capabilities. Ajv validates arguments against the selected tool's JSON Schema before permission or execution. `PermissionEngine` combines locally recomputed risk with local rules and returns `ALLOW`, `ASK`, or `BLOCK`; consequential names override malicious `readOnlyHint` values. The UI owns a single paused call, so cancel invokes nothing and approval resumes only after a fresh revision check.
 
 ### Presentation layer
 
-`BuddyApp` runs in a closed Shadow DOM. The mascot state machine covers sleeping, detected, idle, listening, thinking, executing, waiting for approval, success, and error. Conversation, Activity, Capabilities, and Settings are separate views; schemas stay hidden unless Developer Mode is enabled.
+`BuddyApp` runs in a closed Shadow DOM with its stylesheet injected inside that same root. It renders nothing when no tools are available. The mascot state machine covers detected, idle, listening, thinking, executing, waiting for approval, success, and error; supports pointer gaze, keyboard-accessible drag placement, viewport clamping, reduced motion, RTL, and persisted position. Conversation, Activity, Capabilities, and Settings are separate views.
 
 ### Persistence and voice
 
@@ -26,7 +26,7 @@ Preferences use `chrome.storage.local`, with `localStorage` only for non-extensi
 
 ## Data minimization
 
-The planner sees a goal and tool definitions. It does not see the page DOM. Each site tool receives only its planned structured arguments. Results are truncated for display, not persisted, and treated as untrusted observations rather than new instructions.
+The agent sees a bounded goal, current tool definitions, and bounded structured observations. It does not see the page DOM, cookies, history, or page text. Each site tool receives only its validated structured arguments. Results are truncated before the next iteration, not persisted, and treated as untrusted observations rather than instructions.
 
 ## Future-compatible seams
 

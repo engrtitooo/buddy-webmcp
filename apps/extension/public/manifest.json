@@ -3,12 +3,14 @@
   "name": "Buddy — Your Agentic Web Companion",
   "short_name": "Buddy",
   "version": "0.1.0",
+  "minimum_chrome_version": "149",
   "description": "The friendly interface for the agentic web.",
   "permissions": ["storage"],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" },
+  "background": { "service_worker": "background.js" },
   "content_scripts": [{
     "matches": ["http://*/*", "https://*/*"],
     "js": ["content.js"],
-    "css": ["content.css"],
     "run_at": "document_idle",
     "all_frames": false
   }]

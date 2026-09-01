@@ -14,8 +14,9 @@ export type ToolChangeListener = (tools: WebMCPTool[]) => void;
 
 export class WebMCPAdapter {
   private registered = new Map<string, BrowserRegisteredTool>();
-  private listener?: EventListener;
   private revision = 0;
+  private signature = '';
+  private context: BrowserModelContext | undefined;
 
   isSupported(): boolean {
     return Boolean(document.modelContext?.getTools && document.modelContext?.executeTool);
@@ -23,14 +24,27 @@ export class WebMCPAdapter {
 
   async getTools(): Promise<WebMCPTool[]> {
     const context = document.modelContext;
+    if (context !== this.context) {
+      const contextDisappeared = Boolean(this.context) && !context;
+      this.context = context;
+      this.signature = '';
+      this.registered.clear();
+      if (contextDisappeared) this.revision += 1;
+    }
     if (!context) return [];
-    const tools = await context.getTools();
-    this.registered = new Map(tools.map((tool) => [tool.name, tool]));
-    this.revision += 1;
-    return tools.map(({ name, title, description, inputSchema, origin, annotations }) => ({
-      name, ...(title ? { title } : {}), description, ...(inputSchema ? { inputSchema } : {}), origin,
+    const tools = (await context.getTools()).filter((tool) => typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128 && typeof tool.description === 'string' && tool.description.length <= 2_000).slice(0, 64);
+    const unique = tools.filter((tool, index) => tools.findIndex((candidate) => candidate.name === tool.name) === index);
+    const exposed = unique.map(({ name, title, description, inputSchema, origin, annotations }) => ({
+      name, ...(title ? { title } : {}), description, ...(inputSchema ? { inputSchema } : {}), origin: origin || location.origin,
       ...(annotations ? { annotations: { ...annotations } } : {}),
     }));
+    const nextSignature = JSON.stringify(exposed);
+    if (nextSignature !== this.signature) {
+      this.registered = new Map(unique.map((tool) => [tool.name, tool]));
+      this.signature = nextSignature;
+      this.revision += 1;
+    }
+    return exposed;
   }
 
   getRevision(): number { return this.revision; }
@@ -40,16 +54,24 @@ export class WebMCPAdapter {
     if (expectedRevision !== undefined && expectedRevision !== this.revision) throw new Error('The site actions changed. Please review a fresh plan before continuing.');
     const tool = this.registered.get(name);
     if (!context || !tool) throw new Error(`The ${name} action is no longer available.`);
-    const raw = await context.executeTool(tool, args, signal ? { signal } : {});
+    const timeout = AbortSignal.timeout(30_000);
+    const executionSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const raw = await context.executeTool(tool, args, { signal: executionSignal });
+    if (typeof raw !== 'string') return raw;
     try { return JSON.parse(raw) as unknown; } catch { return raw; }
   }
 
   subscribe(callback: ToolChangeListener): () => void {
-    const context = document.modelContext;
-    if (!context) return () => undefined;
-    this.listener = () => { void this.getTools().then(callback).catch(() => callback([])); };
-    context.addEventListener('toolchange', this.listener);
-    return () => { if (this.listener) context.removeEventListener('toolchange', this.listener); };
+    let context = document.modelContext;
+    let stopped = false;
+    const refresh = () => { const previous = this.revision; void this.getTools().then((tools) => { if (!stopped && previous !== this.revision) callback(tools); }).catch(() => { if (!stopped) callback([]); }); };
+    const listener: EventListener = refresh;
+    context?.addEventListener('toolchange', listener);
+    const interval = setInterval(() => {
+      if (context !== document.modelContext) { context?.removeEventListener('toolchange', listener); context = document.modelContext; context?.addEventListener('toolchange', listener); }
+      refresh();
+    }, 2_000);
+    return () => { stopped = true; clearInterval(interval); context?.removeEventListener('toolchange', listener); };
   }
 }
 

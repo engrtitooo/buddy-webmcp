@@ -5,4 +5,3 @@ coverage/
 .env.local
 *.log
 *.tsbuildinfo
-apps/playground/.openai/hosting.json

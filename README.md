@@ -12,7 +12,7 @@ WebMCP gives agents reliable, structured website actions, but raw tool names and
 
 ## The solution
 
-Buddy lives unobtrusively at the bottom-right of webpages. On ordinary sites it rests. On compatible sites it wakes up, summarizes capabilities in human language, accepts a goal, plans only over advertised WebMCP tools, executes safe work, and pauses at a visible approval card when the user's rules require it.
+Buddy is completely absent on ordinary sites. On compatible sites it wakes up, summarizes capabilities in human language, accepts a goal, selects and validates one advertised WebMCP action at a time, executes safe work, and pauses at a visible approval card when the user's rules require it.
 
 Buddy Market is the included WebMCP Playground: a polished fictional marketplace with 20 products and no real transactions. Search, filters, comparisons, cart state, delivery preferences, and the simulated checkout visibly respond to WebMCP execution.
 
@@ -37,13 +37,13 @@ For local development, use Chrome 149+ and enable `chrome://flags/#enable-webmcp
 
 ```text
 User goal
-  → AgentProvider (mock or remote)
-  → Plan using current WebMCP tools only
-  → PermissionEngine (tool risk + annotations + local rules)
+  → extension service worker → POST /agent/next
+  → one validated next action using current WebMCP tools only
+  → Ajv JSON Schema validation
+  → PermissionEngine (recomputed risk + local rules)
   → ALLOW / ASK / BLOCK
-  → WebMCPAdapter.executeTool()
-  → structured result
-  → human activity trail + visible site update
+  → execute at most one WebMCP tool
+  → bounded observation → repeat or final answer
 ```
 
 ```text
@@ -84,23 +84,24 @@ npm run build
 ## Load the Chrome extension
 
 1. Run `npm run build`.
-2. Open `chrome://extensions`.
-3. Enable **Developer mode**.
-4. Choose **Load unpacked**.
-5. Select `apps/extension/dist`.
-6. Enable the WebMCP testing flag described above and open Buddy Market.
+2. Start the local API with `OPENAI_API_KEY` set, or build against a deployed API as described in [PRODUCTION.md](./PRODUCTION.md).
+3. Open `chrome://extensions`.
+4. Enable **Developer mode**.
+5. Choose **Load unpacked**.
+6. Select `apps/extension/dist`.
+7. Enable the WebMCP testing flag described above and open Buddy Market.
 
-The extension uses one Chrome permission:
+The extension uses one Chrome API permission:
 
 - `storage`: saves language, theme, voice preference, developer mode, and personal approval rules locally.
 
-Its static content script runs on HTTP(S) pages so Buddy can rest on ordinary sites and wake on compatible sites. It requests no tabs, scripting, cookies, identity, browsing history, clipboard, or network interception permission.
+Its static content script runs on HTTP(S) pages but renders nothing until tools exist. A service worker can contact only the build-time API origin in `host_permissions`. It requests no tabs, scripting, cookies, identity, browsing history, clipboard, microphone, or network-interception permission.
 
 ## AI providers
 
-`MockAgentProvider` is the deterministic default and works without a network or key. It makes the recorded demo repeatable.
+`MockAgentProvider` is deterministic and reserved for tests or explicitly wired demos. The production extension never silently falls back to it.
 
-`RemoteAgentProvider` calls the optional `apps/api` proxy. The proxy uses the OpenAI Responses API with Structured Outputs, validates and bounds inputs, recomputes every planned risk locally from the current tool definition, and sets `store: false`. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
+The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, validates and bounds inputs, recomputes every risk locally, adds timeouts/request IDs, and sets `store: false`. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
 
 ```bash
 cp .env.example .env
@@ -108,7 +109,7 @@ npm run build -w @buddy/api
 npm start -w @buddy/api
 ```
 
-The proxy binds to `127.0.0.1` by default, accepts only exact origins in `ALLOWED_ORIGINS`, rejects originless requests, and rate-limits clients. Add the exact Chrome extension origin when using a packaged extension. A public deployment must sit behind an authenticated, rate-limited gateway; CORS is not authentication.
+The proxy binds to `127.0.0.1` by default, accepts only exact origins in `ALLOWED_ORIGINS`, rejects originless requests, and rate-limits clients. Add the exact Chrome extension origin when using a packaged extension. See [PRODUCTION.md](./PRODUCTION.md) for deployment and Chrome Web Store release steps. A public deployment must sit behind an authenticated, durably rate-limited gateway; CORS is not authentication.
 
 ## Approval and personal rules
 
@@ -120,21 +121,21 @@ Tools are mapped locally to `READ`, `LOW_RISK_WRITE`, `EXTERNAL_COMMUNICATION`, 
 
 The default rules ask before submissions, messages, purchases/reservations, and sensitive sharing, and block deletion. Financial and destructive actions never run silently.
 
-Plans are bound to the current WebMCP tool-set revision. If a site adds, removes, or replaces a tool while planning or while approval is pending, Buddy stops and asks the user to review a fresh plan.
+Agent runs are bound to the current WebMCP tool-set revision. If a site adds, removes, or replaces a tool while reasoning or while approval is pending, Buddy cancels the run. The loop is capped at ten decisions and rejects an identical repeated tool call.
 
 ## Voice and localization
 
-Voice is provider-based. The MVP uses browser `SpeechRecognition`/`webkitSpeechRecognition` and `speechSynthesis`, exposes an editable transcript, never auto-speaks unless enabled, and falls back to text when unavailable or denied.
+Voice is provider-based. The MVP uses browser `SpeechRecognition`/`webkitSpeechRecognition` and `speechSynthesis`, defaults to an editable transcript review, offers an explicit auto-send setting, never auto-speaks unless enabled, and falls back to text when unavailable or denied.
 
 Browser language is detected automatically. English, Arabic, and Spanish are implemented; Arabic switches the panel and conversation direction to RTL. Users can override language in Settings.
 
 ## Privacy
 
-Buddy sends no full webpage content. Planning receives only the user's goal and minimal, structured tool definitions. Execution sends arguments only to the selected website tool. Settings remain in Chrome local storage. Sensitive arguments are omitted from normal activity copy; technical request/response data appears only in opt-in Developer Mode and is not persisted.
+Buddy sends no full webpage content. The agent receives only a bounded goal, minimal structured tool definitions, and bounded action observations. Execution sends only JSON-Schema-validated arguments to the selected website tool. Settings remain in Chrome local storage. Technical request/response data appears only in opt-in Developer Mode and is not persisted.
 
 ## Demo walkthrough
 
-1. Visit an ordinary site: Buddy is asleep.
+1. Visit an ordinary site: Buddy is not rendered.
 2. Open Buddy Market: Buddy wakes and announces available capabilities.
 3. Enter: “Find me a gift under $50 that arrives before Thursday. Compare the best options, but don't buy anything without asking me.”
 4. Watch Buddy search, filter, and compare while the product grid updates.
@@ -144,12 +145,12 @@ Buddy sends no full webpage content. Planning receives only the user's goal and 
 
 ## Deployment
 
-The Playground is a static Vite app. After `npm run build -w @buddy/playground`, deploy `apps/playground/dist` to any HTTPS static host. For Chrome's origin trial, add the issued origin-trial token as directed by Chrome's program documentation.
+The Playground is a static Vite app. After `npm run build -w @buddy/playground`, deploy `apps/playground/dist` to any HTTPS static host. For Chrome's origin trial, add the issued origin-trial token as directed by Chrome's program documentation. The production API and extension are separate deployments; follow [PRODUCTION.md](./PRODUCTION.md).
 
 ## Known limitations
 
 - WebMCP remains an experimental Community Group draft; Chrome 149+ flag or origin trial is currently required.
-- The deterministic planner intentionally handles the strongest hackathon shopping flows, not arbitrary domain reasoning. The remote provider is the extensibility path.
+- The deterministic provider is intentionally limited to repeatable tests and demos; the extension requires the remote API.
 - Native speech recognition availability and language quality vary by Chrome platform.
 - Cross-site workflows, encrypted sync, spending limits, site trust scores, and temporary grants are deliberately future work.
 - Automated browser E2E against native WebMCP requires a Chrome 149 test binary with the experimental flag; unit/integration coverage validates the adapter and approval primitives today.

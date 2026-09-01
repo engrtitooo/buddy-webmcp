@@ -1,5 +1,11 @@
-import { build, context } from 'esbuild'; import { cp, mkdir, rm } from 'node:fs/promises'; import { resolve } from 'node:path';
+import { build, context } from 'esbuild'; import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'; import { resolve } from 'node:path';
 const root=resolve(import.meta.dirname); const outdir=resolve(root,'dist'); const watch=process.argv.includes('--watch');
-await rm(outdir,{recursive:true,force:true}); await mkdir(outdir,{recursive:true}); await cp(resolve(root,'public/manifest.json'),resolve(outdir,'manifest.json'));
-const options={entryPoints:[resolve(root,'src/content.tsx')],bundle:true,outdir,entryNames:'content',format:'iife',target:'chrome149',minify:!watch,sourcemap:watch?'inline':false,legalComments:'none',loader:{'.tsx':'tsx','.ts':'ts'}};
+const modeIndex=process.argv.indexOf('--mode'); const inlineMode=process.argv.find((argument)=>argument.startsWith('--mode=')); const mode=inlineMode?.slice('--mode='.length)||(modeIndex>=0?process.argv[modeIndex+1]:'development'); const production=mode==='production';
+const apiBaseUrl=process.env.BUDDY_API_BASE_URL?.trim()||(production?'':'http://127.0.0.1:8787');
+if(!apiBaseUrl)throw new Error('BUDDY_API_BASE_URL is required for a production extension build.');
+const apiUrl=new URL(apiBaseUrl);if(production&&apiUrl.protocol!=='https:')throw new Error('Production BUDDY_API_BASE_URL must use HTTPS.');
+if(!['http:','https:'].includes(apiUrl.protocol))throw new Error('BUDDY_API_BASE_URL must be an HTTP(S) URL.');
+await rm(outdir,{recursive:true,force:true}); await mkdir(outdir,{recursive:true});
+const manifest=JSON.parse(await readFile(resolve(root,'public/manifest.json'),'utf8'));manifest.host_permissions=[`${apiUrl.origin}/*`];await writeFile(resolve(outdir,'manifest.json'),`${JSON.stringify(manifest,null,2)}\n`);
+const options={entryPoints:{content:resolve(root,'src/content.tsx'),background:resolve(root,'src/background.ts')},bundle:true,outdir,format:'iife',target:'chrome149',minify:!watch,sourcemap:watch?'inline':false,legalComments:'none',loader:{'.tsx':'tsx','.ts':'ts','.css':'text'},define:{__BUDDY_API_BASE_URL__:JSON.stringify(apiUrl.href.replace(/\/$/,''))}};
 if(watch){const ctx=await context(options);await ctx.watch();console.log('Buddy extension is rebuilding on changes.');}else await build(options);
