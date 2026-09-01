@@ -23,6 +23,17 @@ Recommended environment:
 
 The service exposes `GET /health` and `POST /agent/next`. Put a public deployment behind TLS, authentication/attestation appropriate to the product, a durable distributed rate limiter, provider spend limits, and monitoring. The included in-memory limiter is a development baseline, not multi-instance infrastructure.
 
+The model-facing Structured Output is a fixed root object with no root union and no additional properties. Tool arguments cross that boundary only as `argsJson`; the API parses the string, requires a plain object, validates it against the current tool schema, computes risk locally, and creates a local call ID before returning an internal decision.
+
+To verify the real provider accepts the schema, optionally run:
+
+```powershell
+$env:OPENAI_API_KEY = 'your-server-side-key'
+npm run smoke:openai -w @buddy/api
+```
+
+The smoke test uses a synthetic tool and the same request builder as the API, prints no key or authorization header, and fails clearly if OpenAI rejects the schema or the result cannot be normalized. It is intentionally excluded from public CI because it requires a paid secret.
+
 ## 2. Build and publish the extension
 
 Create a production bundle with an explicit HTTPS API endpoint:
@@ -33,6 +44,8 @@ npm run build:production -w @buddy/extension
 ```
 
 The build fails if that variable is missing or not HTTPS. It writes the one API origin into `host_permissions`; the service worker never accepts a destination URL from page or content-script data.
+
+Public CI independently builds with the harmless `https://api.example.com` placeholder and verifies the generated manifest contains only `https://api.example.com/*`. That check validates packaging and does not publish the bundle.
 
 For local development, `npm run build -w @buddy/extension` uses `http://127.0.0.1:8787`. Load `apps/extension/dist` as an unpacked extension. After Chrome assigns its extension ID, add that exact origin to the API allowlist and restart the API.
 

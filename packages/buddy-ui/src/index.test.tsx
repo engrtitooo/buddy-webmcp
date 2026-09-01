@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createApprovalArgumentRows, createApprovalSnapshot } from './index';
+import { createApprovalActionLabel, createApprovalArgumentRows, createApprovalSnapshot } from './index';
 
 describe('createApprovalSnapshot', () => {
   it('keeps the complete reviewed payload visible beyond 500 characters', () => {
@@ -29,5 +29,10 @@ describe('createApprovalSnapshot', () => {
     ]);
     const renderedValues = rows.map((row) => row.value).join(' ');
     expect(['{', '}', '[', ']', '"'].some((character) => renderedValues.includes(character))).toBe(false);
+  });
+
+  it('removes the raw tool identifier from an approval action label', () => {
+    expect(createApprovalActionLabel('Add the best option (add_to_cart)', 'add_to_cart')).toBe('Add the best option');
+    expect(createApprovalActionLabel('add_to_cart', 'add_to_cart')).toBe('Add to cart');
   });
 });

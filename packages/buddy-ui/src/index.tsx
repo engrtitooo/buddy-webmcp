@@ -71,6 +71,12 @@ export interface ApprovalArgumentRow { label: string; value: string }
 
 const humanizeArgumentKey = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/^./, (character) => character.toUpperCase());
 
+export function createApprovalActionLabel(label: string, toolName: string): string {
+  const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const withoutTechnicalName = label.replace(new RegExp(escapedToolName, 'gi'), ' ').replace(/\(\s*\)|\[\s*\]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return withoutTechnicalName || humanizeArgumentKey(toolName);
+}
+
 export function createApprovalArgumentRows(args: Record<string, unknown>): ApprovalArgumentRow[] {
   const rows: ApprovalArgumentRow[] = [];
   const visit = (value: unknown, path: string[]) => {
@@ -132,7 +138,7 @@ function ApprovalCard({ approval, locale, developerMode, onApprove, onCancel }: 
   const argumentRows = createApprovalArgumentRows(approval.step.args);
   return <section className="buddy-approval" aria-labelledby="buddy-approval-title">
     <div className="buddy-approval-heading"><CircleAlert size={18}/><h3 id="buddy-approval-title">{t.approvalTitle}</h3></div>
-    <dl><div><dt>What</dt><dd>{approval.what}</dd></div><div><dt>Why</dt><dd>{approval.why}</dd></div><div><dt>Site</dt><dd>{approval.site}</dd></div><div><dt>Risk</dt><dd>{approval.risk.replaceAll('_', ' ')}</dd></div></dl>
+    <dl><div><dt>What</dt><dd>{approval.what}</dd></div><div><dt>Why</dt><dd>{approval.why}</dd></div><div><dt>Site</dt><dd>{approval.site}</dd></div><div><dt>Risk</dt><dd>{approval.risk.replaceAll('_', ' ')}</dd></div>{developerMode && <div><dt>Tool</dt><dd><code>{approval.step.toolName}</code></dd></div>}</dl>
     <div className="buddy-approval-values" aria-label="Action details">{argumentRows.map((row, index) => <div key={`${row.label}-${index}`}><span>{row.label}</span><strong>{row.value}</strong></div>)}</div>
     {developerMode && <details className="buddy-approval-technical"><summary>Raw arguments</summary><pre><code>{approval.argumentsJson}</code></pre></details>}
     <div className="buddy-approval-actions"><button className="buddy-secondary" onClick={onCancel}>{t.cancel}</button><button className="buddy-primary" onClick={onApprove}>{t.approve}</button></div>
@@ -212,19 +218,21 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
         if (decision.kind === 'rejected_tool_call') {
           run.guard.assertNew(decision);
           run.observations.push({ callId: decision.callId, toolName: decision.toolName, args: decision.args, outcome: 'rejected', error: decision.message });
-          setActivity((items) => [...items, { id: decision.callId, label: `Correct ${decision.toolName}`, status: 'failed', detail: 'Buddy rejected invalid arguments and asked the AI to correct them.', technical: { tool: decision.toolName, request: decision.args, response: decision.message } }]);
+          setActivity((items) => [...items, { id: decision.callId, label: 'Correct invalid action details', status: 'failed', detail: 'Buddy rejected invalid arguments and asked the AI to correct them.', technical: { tool: decision.toolName, request: decision.args, response: decision.message } }]);
           continue;
         }
         run.guard.assertNew(decision);
-        setActivity((items) => [...items, { id: decision.callId, label: decision.label, status: 'pending' }]);
+        const actionLabel = createApprovalActionLabel(decision.label, decision.toolName);
+        const displayCall = { ...decision, label: actionLabel };
+        setActivity((items) => [...items, { id: decision.callId, label: actionLabel, status: 'pending' }]);
         const permission = new PermissionEngine().evaluate(decision, settings.rules);
-        if (permission === 'BLOCK') { updateActivity(decision.callId, { status: 'canceled', detail: 'Blocked by your Buddy rules.' }); addMessage('assistant', `I stopped before “${decision.label}” because your rules block this action.`); setState('IDLE'); stopRun(run); return; }
+        if (permission === 'BLOCK') { updateActivity(decision.callId, { status: 'canceled', detail: 'Blocked by your Buddy rules.' }); addMessage('assistant', `I stopped before “${actionLabel}” because your rules block this action.`); setState('IDLE'); stopRun(run); return; }
         if (permission === 'ASK') {
           const reviewed = createApprovalSnapshot(decision.args);
-          const reviewedCall = { ...decision, args: reviewed.args };
-          run.pending = reviewedCall; setApproval({ step: { id: reviewedCall.callId, toolName: reviewedCall.toolName, args: reviewedCall.args, label: reviewedCall.label, risk: reviewedCall.risk }, what: `${reviewedCall.label} (${reviewedCall.toolName})`, why: reviewedCall.reason, argumentsJson: reviewed.argumentsJson, site: siteName, risk: reviewedCall.risk }); setState('WAITING_FOR_APPROVAL'); return;
+          const reviewedCall = { ...displayCall, args: reviewed.args };
+          run.pending = reviewedCall; setApproval({ step: { id: reviewedCall.callId, toolName: reviewedCall.toolName, args: reviewedCall.args, label: reviewedCall.label, risk: reviewedCall.risk }, what: reviewedCall.label, why: reviewedCall.reason, argumentsJson: reviewed.argumentsJson, site: siteName, risk: reviewedCall.risk }); setState('WAITING_FOR_APPROVAL'); return;
         }
-        await executeCall(run, decision);
+        await executeCall(run, displayCall);
       }
       if (!run.controller.signal.aborted && activeRun.current?.id === run.id) throw new Error('Buddy reached its safe action limit and stopped.');
     } catch (error) {

@@ -183,11 +183,12 @@ describe('BuddyApp integration', () => {
   });
 
   it('keeps raw approval JSON developer-only and renders malicious text inert', async () => {
-    const call = { kind: 'tool_call', toolName: 'frobnicate', args: { recipient: { accountId: 'reviewed-user' }, note: '<img src=x onerror=alert(1)>' }, label: 'Update item', reason: 'Continue', risk: 'LOW_RISK_WRITE' };
+    const call = { kind: 'tool_call', toolName: 'frobnicate', args: { recipient: { accountId: 'reviewed-user' }, note: '<img src=x onerror=alert(1)>' }, label: 'Update item (frobnicate)', reason: 'Continue', risk: 'LOW_RISK_WRITE' };
     const normal = await renderBuddy(new FakeAdapter([writeTool]), new QueueProvider([call])); await submitGoal(normal);
-    expect(normal.textContent).toContain('Recipient › Account Id'); expect(normal.textContent).toContain('<img src=x onerror=alert(1)>'); expect(normal.querySelector('img')).toBeNull(); expect(normal.textContent).not.toContain('Raw arguments');
+    expect(normal.textContent).toContain('Update item'); expect(normal.textContent).not.toContain('frobnicate'); expect(normal.textContent).toContain('Recipient › Account Id'); expect(normal.textContent).toContain('<img src=x onerror=alert(1)>'); expect(normal.querySelector('img')).toBeNull(); expect(normal.textContent).not.toContain('Raw arguments');
+    await click([...normal.querySelectorAll('button')].find((button) => button.textContent?.includes('Activity')) ?? null); expect(normal.textContent).not.toContain('frobnicate');
     const developer = await renderBuddy(new FakeAdapter([writeTool]), new QueueProvider([call]), { store: makeStore({ developerMode: true }) }); await submitGoal(developer);
-    expect(developer.textContent).toContain('Raw arguments');
+    expect(developer.textContent).toContain('Tool'); expect(developer.textContent).toContain('frobnicate'); expect(developer.textContent).toContain('Raw arguments');
   });
 
   it('includes a deterministic reduced-motion override', () => {

@@ -1,16 +1,26 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { OPENAI_DECISION_SCHEMA, normalizeOpenAIModelDecision } from './openai';
 import { MemoryRateLimiter, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
 
 const origin = 'https://client.example';
 const tool = { name: 'search', description: 'Search', origin, annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } };
 const payload = { sessionId: 'session-1', turn: 0, goal: 'Find a gift', tools: [tool], observations: [] };
 const servers: Server[] = [];
+const modelToolCall = (overrides: Record<string, unknown> = {}) => ({ kind: 'tool_call', toolName: 'search', argsJson: '{"query":"gift"}', label: 'Search for gifts', reason: 'Find candidates', message: null, ...overrides });
 
 async function start(server: Server): Promise<string> {
   servers.push(server); await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo; return `http://127.0.0.1:${address.port}`;
+}
+
+function expectClosedObjectSchemas(value: unknown): void {
+  if (Array.isArray(value)) { value.forEach(expectClosedObjectSchemas); return; }
+  if (!value || typeof value !== 'object') return;
+  const schema = value as Record<string, unknown>;
+  if (schema.type === 'object') expect(schema.additionalProperties).toBe(false);
+  Object.values(schema).forEach(expectClosedObjectSchemas);
 }
 
 afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); vi.restoreAllMocks(); });
@@ -79,29 +89,50 @@ describe('Buddy API', () => {
     const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     expect(response.status).toBe(503); expect(response.headers.get('x-request-id')).toBeTruthy(); expect(await response.text()).not.toContain('OPENAI');
   });
-  it('uses Responses Structured Outputs, store false, and the Luna default', async () => {
+  it('sends OpenAI a strict fixed-object Structured Output contract', async () => {
     let providerBody: Record<string, unknown> | undefined;
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       providerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'tool_call', callId: '1', toolName: 'search', args: { query: 'gift' }, label: 'Search', reason: 'Find candidates', risk: 'READ' }) }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ output_text: JSON.stringify(modelToolCall()) }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
     const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
     const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ kind: 'tool_call', toolName: 'search', risk: 'READ' });
     expect(providerBody).toMatchObject({ model: 'gpt-5.6-luna', store: false, text: { format: { type: 'json_schema', strict: true } } });
+    const format = ((providerBody?.text as Record<string, unknown>).format as Record<string, unknown>);
+    const schema = format.schema as Record<string, unknown>;
+    expect(format.type).toBe('json_schema'); expect(format.strict).toBe(true);
+    expect(schema).toEqual(OPENAI_DECISION_SCHEMA); expect(schema.type).toBe('object'); expect(schema.additionalProperties).toBe(false);
+    expect(schema).not.toHaveProperty('anyOf'); expect(schema).not.toHaveProperty('oneOf'); expectClosedObjectSchemas(schema);
+    expect(schema.required).toEqual(['kind', 'toolName', 'argsJson', 'label', 'reason', 'message']);
+    expect(Object.keys(schema.properties as Record<string, unknown>)).not.toEqual(expect.arrayContaining(['args', 'risk', 'callId']));
   });
-  it('recomputes a dishonest provider risk label', async () => {
+
+  it('normalizes valid tool_call, final, and needs_input envelopes', () => {
+    expect(normalizeOpenAIModelDecision(modelToolCall(), [tool])).toMatchObject({ kind: 'tool_call', toolName: 'search', args: { query: 'gift' }, risk: 'READ' });
+    expect(normalizeOpenAIModelDecision({ kind: 'final', toolName: null, argsJson: null, label: null, reason: null, message: 'Done.' }, [tool])).toEqual({ kind: 'final', message: 'Done.' });
+    expect(normalizeOpenAIModelDecision({ kind: 'needs_input', toolName: null, argsJson: null, label: null, reason: null, message: 'Which date?' }, [tool])).toEqual({ kind: 'needs_input', message: 'Which date?' });
+    expect(() => normalizeOpenAIModelDecision({ kind: 'final', toolName: 'search', argsJson: null, label: null, reason: null, message: 'Done.' }, [tool])).toThrow(/inconsistent/);
+  });
+
+  it.each([
+    ['malformed JSON', '{not json', /valid JSON/],
+    ['an array', '["gift"]', /JSON object/],
+    ['a primitive', '42', /JSON object/],
+    ['schema-invalid arguments', '{}', /schema/],
+  ])('turns argsJson containing %s into repairable feedback', (_case, argsJson, message) => {
+    expect(normalizeOpenAIModelDecision(modelToolCall({ argsJson }), [tool])).toMatchObject({ kind: 'rejected_tool_call', toolName: 'search', message: expect.stringMatching(message) });
+  });
+
+  it('turns an unavailable tool into non-executable repair feedback', () => {
+    expect(normalizeOpenAIModelDecision(modelToolCall({ toolName: 'missing' }), [tool])).toMatchObject({ kind: 'rejected_tool_call', toolName: 'missing', args: { query: 'gift' } });
+  });
+
+  it('never accepts a provider risk or call ID and derives both locally', () => {
     const financialTool = { ...tool, name: 'purchase_now', description: 'Only reads', annotations: { readOnlyHint: true }, inputSchema: { type: 'object' } };
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'tool_call', callId: '1', toolName: 'purchase_now', args: {}, label: 'Read', reason: 'Continue', risk: 'READ' }) }), { status: 200 })) as typeof fetch;
-    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
-    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, tools: [financialTool] }) });
-    expect(await response.json()).toMatchObject({ risk: 'FINANCIAL' });
-  });
-  it('returns invalid AI arguments as repairable feedback without executing anything', async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'tool_call', callId: '1', toolName: 'search', args: {}, label: 'Search', reason: 'Find candidates', risk: 'READ' }) }), { status: 200 })) as typeof fetch;
-    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
-    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ kind: 'rejected_tool_call', toolName: 'search', message: expect.stringMatching(/schema/) });
+    const decision = normalizeOpenAIModelDecision(modelToolCall({ toolName: 'purchase_now', argsJson: '{}' }), [financialTool]);
+    expect(decision).toMatchObject({ kind: 'tool_call', risk: 'FINANCIAL', callId: expect.stringMatching(/^[0-9a-f-]{36}$/i) });
+    expect(() => normalizeOpenAIModelDecision({ ...modelToolCall(), risk: 'READ', callId: 'provider-id' }, [tool])).toThrow(/envelope/);
   });
   it('rejects oversized request bodies', async () => {
     const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test' }));

@@ -81,6 +81,8 @@ npm run lint
 npm run build
 ```
 
+CI also builds the extension in production mode against `https://api.example.com` and verifies that this is the only generated `host_permissions` entry. The validation artifact is not published.
+
 ## Load the Chrome extension
 
 1. Run `npm run build`.
@@ -101,7 +103,7 @@ Its static content script runs on HTTP(S) pages but renders nothing until tools 
 
 `MockAgentProvider` is deterministic and reserved for tests or explicitly wired demos. The production extension never silently falls back to it.
 
-The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, validates and bounds inputs, recomputes every risk locally, adds timeouts/request IDs, and sets `store: false`. Invalid model-proposed arguments become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
+The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it with Ajv against the current WebMCP schema, recomputes risk, and generates the call ID locally. Invalid proposals become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
 
 ```bash
 cp .env.example .env
@@ -116,12 +118,14 @@ The proxy binds to `127.0.0.1` by default, accepts only exact origins in `ALLOWE
 Tools are mapped locally to `READ`, `LOW_RISK_WRITE`, `EXTERNAL_COMMUNICATION`, `FINANCIAL`, `DESTRUCTIVE`, or `SENSITIVE`. Remote risk labels are never authoritative, consequential names override `readOnlyHint`, and the Permission Engine combines the normalized risk with locally stored user rules.
 
 - `ALLOW`: execute and record the step.
-- `ASK`: pause the plan and show what will happen, why approval is needed, the site, risk, and complete human-readable argument values. **Approve once** resumes the same plan; **Cancel** executes nothing. Raw argument JSON is available only in Developer Mode.
+- `ASK`: pause the plan and show what will happen, why approval is needed, the site, risk, and complete human-readable argument values. **Approve once** resumes the same plan; **Cancel** executes nothing. Raw argument JSON and raw WebMCP tool names are available only in Developer Mode.
 - `BLOCK`: stop and explain which personal rule prevented the action.
 
 The default rules ask before submissions, messages, purchases/reservations, and sensitive sharing, and block deletion. Financial and destructive actions never run silently.
 
 Agent runs are bound to the current WebMCP tool-set revision. If a site adds, removes, or replaces a tool while reasoning or while approval is pending, Buddy cancels the run. The loop is capped at ten decisions and rejects an identical repeated tool call.
+
+WebMCP discovery uses adaptive fallback polling at 2, 5, 10, then 30 seconds while the API is absent. Once detected, `toolchange` remains immediate and a conservative 30-second compatibility refresh detects replaced or disappearing experimental implementations.
 
 ## Voice and localization
 

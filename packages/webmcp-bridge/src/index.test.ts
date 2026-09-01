@@ -55,4 +55,23 @@ describe('WebMCPAdapter', () => {
     Object.defineProperty(document, 'modelContext', { configurable: true, value: context }); await vi.advanceTimersByTimeAsync(2_100);
     expect(callback).toHaveBeenCalledWith([expect.objectContaining({ name: 'search' })]);
   });
+  it('backs off discovery polling while WebMCP is unavailable and cleans up its timer', async () => {
+    vi.useFakeTimers(); Object.defineProperty(document, 'modelContext', { configurable: true, value: undefined });
+    const adapter = new WebMCPAdapter(); const getTools = vi.spyOn(adapter, 'getTools'); const cleanup = adapter.subscribe(vi.fn()); cleanups.push(cleanup);
+    await vi.advanceTimersByTimeAsync(1_999); expect(getTools).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(getTools).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4_999); expect(getTools).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); expect(getTools).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000); expect(getTools).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(30_000); expect(getTools).toHaveBeenCalledTimes(4);
+    cleanup(); await vi.advanceTimersByTimeAsync(60_000); expect(getTools).toHaveBeenCalledTimes(4);
+  });
+  it('uses toolchange immediately and a slow fallback to detect disappearance', async () => {
+    vi.useFakeTimers(); const adapter = new WebMCPAdapter(); await adapter.getTools(); const callback = vi.fn(); cleanups.push(adapter.subscribe(callback));
+    tools = [...tools, { name: 'compare', description: 'Compare', origin: 'https://example.com', window }]; context.dispatchEvent(new Event('toolchange'));
+    await vi.advanceTimersByTimeAsync(0); expect(callback).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ name: 'compare' })]));
+    callback.mockClear(); Object.defineProperty(document, 'modelContext', { configurable: true, value: undefined });
+    await vi.advanceTimersByTimeAsync(29_999); expect(callback).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(callback).toHaveBeenCalledWith([]);
+  });
 });

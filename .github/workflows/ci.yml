@@ -24,3 +24,9 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      - name: Build the production extension
+        env:
+          BUDDY_API_BASE_URL: https://api.example.com
+        run: npm run build:production -w @buddy/extension
+      - name: Verify the production API host permission
+        run: npm run verify:production-manifest -w @buddy/extension

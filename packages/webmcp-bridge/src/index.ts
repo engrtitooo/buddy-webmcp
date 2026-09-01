@@ -53,7 +53,7 @@ export class WebMCPAdapter {
     const context = document.modelContext;
     if (expectedRevision !== undefined && expectedRevision !== this.revision) throw new Error('The site actions changed. Please review a fresh plan before continuing.');
     const tool = this.registered.get(name);
-    if (!context || !tool) throw new Error(`The ${name} action is no longer available.`);
+    if (!context || !tool) throw new Error('The selected site action is no longer available.');
     const timeout = AbortSignal.timeout(30_000);
     const executionSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const raw = await context.executeTool(tool, args, { signal: executionSignal });
@@ -64,14 +64,38 @@ export class WebMCPAdapter {
   subscribe(callback: ToolChangeListener): () => void {
     let context = document.modelContext;
     let stopped = false;
-    const refresh = () => { const previous = this.revision; void this.getTools().then((tools) => { if (!stopped && previous !== this.revision) callback(tools); }).catch(() => { if (!stopped) callback([]); }); };
-    const listener: EventListener = refresh;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let discoveryIndex = 0;
+    let refreshing = false;
+    const discoveryDelays = [2_000, 5_000, 10_000, 30_000] as const;
+    const syncContext = () => {
+      if (context === document.modelContext) return;
+      context?.removeEventListener('toolchange', listener);
+      context = document.modelContext;
+      context?.addEventListener('toolchange', listener);
+      if (!context) discoveryIndex = 0;
+    };
+    const refresh = async () => {
+      if (stopped || refreshing) return;
+      refreshing = true;
+      try {
+        syncContext();
+        const previous = this.revision;
+        const tools = await this.getTools();
+        if (!stopped && previous !== this.revision) callback(tools);
+      } catch { if (!stopped) callback([]); }
+      finally { refreshing = false; }
+    };
+    const listener: EventListener = () => { void refresh(); };
+    const schedule = () => {
+      if (stopped) return;
+      const delay = context ? 30_000 : discoveryDelays[Math.min(discoveryIndex, discoveryDelays.length - 1)]!;
+      if (!context && discoveryIndex < discoveryDelays.length - 1) discoveryIndex += 1;
+      timer = setTimeout(() => { timer = undefined; void refresh().finally(schedule); }, delay);
+    };
     context?.addEventListener('toolchange', listener);
-    const interval = setInterval(() => {
-      if (context !== document.modelContext) { context?.removeEventListener('toolchange', listener); context = document.modelContext; context?.addEventListener('toolchange', listener); }
-      refresh();
-    }, 2_000);
-    return () => { stopped = true; clearInterval(interval); context?.removeEventListener('toolchange', listener); };
+    schedule();
+    return () => { stopped = true; if (timer !== undefined) clearTimeout(timer); context?.removeEventListener('toolchange', listener); };
   }
 }
 
