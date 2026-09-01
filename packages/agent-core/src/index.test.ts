@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_RULES, type WebMCPTool } from '@buddy/shared';
-import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, classifyRisk, normalizeAgentDecision, normalizePlan, toolCallFingerprint, validateToolArguments } from './index';
+import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, classifyRisk, normalizeAgentDecision, normalizeAgentDecisionOrRejection, normalizePlan, toolCallFingerprint, validateToolArguments } from './index';
 const tool = (name: string, description = name, readOnlyHint = false): WebMCPTool => ({ name, description, origin: 'https://example.com', annotations: { readOnlyHint } });
 
 describe('CapabilityMapper', () => {
@@ -112,6 +112,13 @@ describe('normalizeAgentDecision', () => {
   it('validates arguments before returning a call', () => {
     const schemaTool: WebMCPTool = { name: 'search', description: 'Search', origin: 'https://example.com', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
     expect(() => normalizeAgentDecision({ kind: 'tool_call', toolName: 'search', args: {}, label: 'Search', reason: 'test' }, [schemaTool])).toThrow(/schema/);
+  });
+  it('turns an invalid tool call into bounded repair feedback', () => {
+    const schemaTool: WebMCPTool = { name: 'search', description: 'Search', origin: 'https://example.com', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
+    expect(normalizeAgentDecisionOrRejection({ kind: 'tool_call', toolName: 'search', args: {}, label: 'Search', reason: 'test' }, [schemaTool])).toMatchObject({ kind: 'rejected_tool_call', toolName: 'search', args: {}, message: expect.stringMatching(/schema/) });
+  });
+  it('preserves a server-generated rejection without making it executable', () => {
+    expect(normalizeAgentDecisionOrRejection({ kind: 'rejected_tool_call', callId: 'server-id', toolName: 'missing', args: {}, message: 'Use an available tool.' }, [])).toMatchObject({ kind: 'rejected_tool_call', toolName: 'missing', message: 'Use an available tool.' });
   });
 });
 

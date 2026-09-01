@@ -144,6 +144,31 @@ export function normalizeAgentDecision(value: unknown, tools: WebMCPTool[]): Age
   };
 }
 
+export function normalizeAgentDecisionOrRejection(value: unknown, tools: WebMCPTool[]): AgentDecision {
+  if (isRecord(value) && value.kind === 'rejected_tool_call') {
+    if (typeof value.toolName !== 'string' || !value.toolName.trim() || value.toolName.length > 128 || !isRecord(value.args) || !boundedJsonLength(value.args, AGENT_LIMITS.maxPayloadBytes) || typeof value.message !== 'string' || !value.message.trim()) {
+      throw new Error('The agent returned an invalid rejected action.');
+    }
+    return { kind: 'rejected_tool_call', callId: crypto.randomUUID(), toolName: value.toolName, args: value.args, message: value.message.trim().slice(0, 1_000) };
+  }
+  try {
+    return normalizeAgentDecision(value, tools);
+  } catch (error) {
+    if (!isRecord(value) || value.kind !== 'tool_call') throw error;
+    const toolName = typeof value.toolName === 'string' && value.toolName.trim() && value.toolName.length <= 128 ? value.toolName : 'invalid_tool';
+    const args = isRecord(value.args) && boundedJsonLength(value.args, AGENT_LIMITS.maxPayloadBytes)
+      ? JSON.parse(JSON.stringify(value.args)) as Record<string, unknown>
+      : {};
+    return {
+      kind: 'rejected_tool_call',
+      callId: crypto.randomUUID(),
+      toolName,
+      args,
+      message: (error instanceof Error ? error.message : 'The proposed tool call was invalid.').slice(0, 1_000),
+    };
+  }
+}
+
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (!isRecord(value)) return value;
@@ -191,7 +216,7 @@ export function normalizePlan(value: unknown, tools: WebMCPTool[]): AgentPlan {
 }
 
 export interface AgentProvider {
-  next(input: AgentNextInput, signal?: AbortSignal): Promise<AgentDecision>;
+  next(input: AgentNextInput, signal?: AbortSignal): Promise<unknown>;
   summarizeCapabilities(capabilities: Capability[]): Promise<string>;
   interpretToolResult(step: PlanStep, result: unknown): Promise<string>;
 }
@@ -247,13 +272,13 @@ export class MockAgentProvider implements AgentProvider {
 
 export class RemoteAgentProvider implements AgentProvider {
   constructor(private readonly endpoint: string) {}
-  async next(input: AgentNextInput, signal?: AbortSignal): Promise<AgentDecision> {
+  async next(input: AgentNextInput, signal?: AbortSignal): Promise<unknown> {
     const response = await fetch(`${this.endpoint.replace(/\/$/, '')}/agent/next`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, ...(signal ? { signal } : {}),
       body: JSON.stringify(input),
     });
     if (!response.ok) throw new Error(response.status === 429 ? 'The agent service is busy. Try again shortly.' : 'The agent service is unavailable.');
-    return normalizeAgentDecision(await response.json(), input.tools);
+    return response.json();
   }
   async interpretGoal(goal: string, tools: WebMCPTool[]): Promise<AgentPlan> {
     const response = await fetch(`${this.endpoint.replace(/\/$/, '')}/plan`, {

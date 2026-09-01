@@ -1,7 +1,6 @@
-import { MockAgentProvider, normalizeAgentDecision, type AgentProvider } from '@buddy/agent-core';
+import { MockAgentProvider, type AgentProvider } from '@buddy/agent-core';
 import {
   AGENT_NEXT_MESSAGE,
-  type AgentDecision,
   type AgentNextInput,
   type AgentNextRuntimeMessage,
   type AgentNextRuntimeResponse,
@@ -14,7 +13,7 @@ function abortError(): DOMException {
 }
 
 export class ExtensionAgentProvider implements AgentProvider {
-  async next(input: AgentNextInput, signal?: AbortSignal): Promise<AgentDecision> {
+  async next(input: AgentNextInput, signal?: AbortSignal): Promise<unknown> {
     if (signal?.aborted) throw abortError();
     const message: AgentNextRuntimeMessage = { type: AGENT_NEXT_MESSAGE, payload: input };
     const pending = chrome.runtime.sendMessage(message) as Promise<AgentNextRuntimeResponse>;
@@ -25,9 +24,9 @@ export class ExtensionAgentProvider implements AgentProvider {
         ])
       : await pending;
     if (!response || !response.ok) {
-      throw new Error(response?.error.message ?? 'Buddy could not reach its agent service.');
+      throw new Error(response?.error.retryable ? "Buddy's AI service is temporarily unavailable." : response?.error.message ?? 'Buddy could not reach its agent service.');
     }
-    return normalizeAgentDecision(response.decision, input.tools);
+    return response.decision;
   }
 
   async summarizeCapabilities(capabilities: Capability[]): Promise<string> {

@@ -89,7 +89,7 @@ export interface AgentObservation {
   callId: string;
   toolName: string;
   args: Record<string, unknown>;
-  outcome: 'success' | 'error' | 'canceled';
+  outcome: 'success' | 'error' | 'canceled' | 'rejected';
   result?: unknown;
   error?: string;
 }
@@ -111,6 +111,13 @@ export type AgentDecision =
       label: string;
       reason: string;
       risk: RiskCategory;
+    }
+  | {
+      kind: 'rejected_tool_call';
+      callId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+      message: string;
     }
   | { kind: 'final'; message: string }
   | { kind: 'needs_input'; message: string };

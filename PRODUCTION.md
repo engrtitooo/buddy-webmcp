@@ -9,7 +9,9 @@ Deploy `apps/api` to a Node.js 22+ HTTPS service (for example Cloud Run, Render,
 Required environment:
 
 - `OPENAI_API_KEY`: server secret; never put this in GitHub, the website, or the extension.
-- `ALLOWED_ORIGINS`: comma-separated exact callers. Include the final `chrome-extension://<extension-id>` origin. CORS is not authentication.
+- `ALLOWED_ORIGINS`: comma-separated exact HTTPS and/or `chrome-extension://` callers. Include the final `chrome-extension://<extension-id>` origin. CORS is not authentication.
+
+When `NODE_ENV=production`, the API fails before listening if either required value is absent, originless requests are enabled, an origin is malformed or insecure, or a localhost origin is configured.
 
 Recommended environment:
 

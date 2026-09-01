@@ -101,7 +101,7 @@ Its static content script runs on HTTP(S) pages but renders nothing until tools 
 
 `MockAgentProvider` is deterministic and reserved for tests or explicitly wired demos. The production extension never silently falls back to it.
 
-The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, validates and bounds inputs, recomputes every risk locally, adds timeouts/request IDs, and sets `store: false`. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
+The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, validates and bounds inputs, recomputes every risk locally, adds timeouts/request IDs, and sets `store: false`. Invalid model-proposed arguments become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
 
 ```bash
 cp .env.example .env
@@ -116,7 +116,7 @@ The proxy binds to `127.0.0.1` by default, accepts only exact origins in `ALLOWE
 Tools are mapped locally to `READ`, `LOW_RISK_WRITE`, `EXTERNAL_COMMUNICATION`, `FINANCIAL`, `DESTRUCTIVE`, or `SENSITIVE`. Remote risk labels are never authoritative, consequential names override `readOnlyHint`, and the Permission Engine combines the normalized risk with locally stored user rules.
 
 - `ALLOW`: execute and record the step.
-- `ASK`: pause the plan and show what will happen, why approval is needed, and the relevant values. **Approve once** resumes the same plan; **Cancel** executes nothing.
+- `ASK`: pause the plan and show what will happen, why approval is needed, the site, risk, and complete human-readable argument values. **Approve once** resumes the same plan; **Cancel** executes nothing. Raw argument JSON is available only in Developer Mode.
 - `BLOCK`: stop and explain which personal rule prevented the action.
 
 The default rules ask before submissions, messages, purchases/reservations, and sensitive sharing, and block deletion. Financial and destructive actions never run silently.
@@ -153,7 +153,7 @@ The Playground is a static Vite app. After `npm run build -w @buddy/playground`,
 - The deterministic provider is intentionally limited to repeatable tests and demos; the extension requires the remote API.
 - Native speech recognition availability and language quality vary by Chrome platform.
 - Cross-site workflows, encrypted sync, spending limits, site trust scores, and temporary grants are deliberately future work.
-- Automated browser E2E against native WebMCP requires a Chrome 149 test binary with the experimental flag; unit/integration coverage validates the adapter and approval primitives today.
+- Automated native-WebMCP E2E still requires a compatible Chrome binary with WebMCP enabled. Deterministic React integration tests cover detection, tool changes, execution, approval, cancellation, repair, voice, RTL, dragging, malicious text, and reduced motion without depending on that external browser setup.
 
 ## Screenshots
 

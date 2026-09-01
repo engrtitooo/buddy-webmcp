@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRateLimiter, createBuddyServer, parseAgentNextInput } from './server';
+import { MemoryRateLimiter, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
 
 const origin = 'https://client.example';
 const tool = { name: 'search', description: 'Search', origin, annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } };
@@ -27,6 +27,26 @@ describe('parseAgentNextInput', () => {
   });
   it('rejects observations for tools outside the current inventory', () => {
     expect(() => parseAgentNextInput({ ...payload, observations: [{ callId: '1', toolName: 'missing', args: {}, outcome: 'success' }] })).toThrow(/observation/);
+  });
+  it('accepts bounded rejected-call feedback for a nonexistent tool', () => {
+    expect(parseAgentNextInput({ ...payload, observations: [{ callId: '1', toolName: 'missing', args: {}, outcome: 'rejected', error: 'Use an available tool.' }] }).observations[0]).toMatchObject({ toolName: 'missing', outcome: 'rejected' });
+  });
+});
+
+describe('production environment', () => {
+  it('fails fast when required production values are missing', () => {
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production' })).toThrow(/OPENAI_API_KEY, ALLOWED_ORIGINS/);
+  });
+  it('rejects originless and localhost production configurations', () => {
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'https://app.example', ALLOW_ORIGINLESS: 'true' })).toThrow(/originless/i);
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'http://localhost:5173' })).toThrow(/localhost/i);
+  });
+  it('rejects invalid and insecure public production origins', () => {
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'not-an-origin' })).toThrow(/invalid production origin/i);
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'http://app.example' })).toThrow(/HTTPS or chrome-extension/i);
+  });
+  it('accepts an explicit production extension origin', () => {
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'chrome-extension://abcdefghijklmnop' })).not.toThrow();
   });
 });
 
@@ -76,6 +96,23 @@ describe('Buddy API', () => {
     const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
     const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, tools: [financialTool] }) });
     expect(await response.json()).toMatchObject({ risk: 'FINANCIAL' });
+  });
+  it('returns invalid AI arguments as repairable feedback without executing anything', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'tool_call', callId: '1', toolName: 'search', args: {}, label: 'Search', reason: 'Find candidates', risk: 'READ' }) }), { status: 200 })) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ kind: 'rejected_tool_call', toolName: 'search', message: expect.stringMatching(/schema/) });
+  });
+  it('rejects oversized request bodies', async () => {
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test' }));
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, goal: 'x'.repeat(110_000) }) });
+    expect(response.status).toBe(413);
+  });
+  it('normalizes provider timeouts without exposing details', async () => {
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('provider secret', 'AbortError')), { once: true }))) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl, providerTimeoutMs: 5 }));
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    expect(response.status).toBe(504); const body = await response.text(); expect(body).toContain('timed out'); expect(body).not.toContain('provider secret');
   });
   it('does not expose provider response details on failure', async () => {
     const fetchImpl = vi.fn(async () => new Response('secret provider detail', { status: 500 })) as typeof fetch;

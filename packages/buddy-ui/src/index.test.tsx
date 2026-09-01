@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createApprovalSnapshot } from './index';
+import { createApprovalArgumentRows, createApprovalSnapshot } from './index';
 
 describe('createApprovalSnapshot', () => {
   it('keeps the complete reviewed payload visible beyond 500 characters', () => {
@@ -17,5 +17,17 @@ describe('createApprovalSnapshot', () => {
     original.recipient.id = 'changed-after-review';
     expect(reviewed.args).toEqual({ recipient: { id: 'reviewed-user' }, message: 'Hello' });
     expect(reviewed.argumentsJson).not.toContain('changed-after-review');
+  });
+
+  it('formats nested arguments completely without raw JSON syntax', () => {
+    const rows = createApprovalArgumentRows({ recipient: { accountId: 'reviewed-user' }, items: ['one', 'two'], urgent: true });
+    expect(rows).toEqual([
+      { label: 'Recipient › Account Id', value: 'reviewed-user' },
+      { label: 'Items › Item 1', value: 'one' },
+      { label: 'Items › Item 2', value: 'two' },
+      { label: 'Urgent', value: 'Yes' },
+    ]);
+    const renderedValues = rows.map((row) => row.value).join(' ');
+    expect(['{', '}', '[', ']', '"'].some((character) => renderedValues.includes(character))).toBe(false);
   });
 });
