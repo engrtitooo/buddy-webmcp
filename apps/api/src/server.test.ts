@@ -70,6 +70,10 @@ describe('MemoryRateLimiter', () => {
 });
 
 describe('Buddy API', () => {
+  it('serves a public API status at the root without weakening protected routes', async () => {
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: '' })); const response = await fetch(base);
+    expect(response.status).toBe(200); await expect(response.json()).resolves.toEqual({ name: 'Buddy WebMCP API', status: 'ok', health: '/health' });
+  });
   it('serves a credential-free health check', async () => {
     const base = await start(createBuddyServer({ apiKey: '' })); const response = await fetch(`${base}/health`);
     expect(response.status).toBe(200); await expect(response.json()).resolves.toEqual({ status: 'ok' });

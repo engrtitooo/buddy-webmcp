@@ -122,6 +122,7 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
       res.writeHead(status, headers); res.end(status === 204 ? undefined : JSON.stringify(body));
       console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path: req.url, status, durationMs: Date.now() - started }));
     };
+    if (req.url === '/' && req.method === 'GET') { reply(200, { name: 'Buddy WebMCP API', status: 'ok', health: '/health' }); return; }
     if (req.url === '/health' && req.method === 'GET') { reply(200, { status: 'ok' }); return; }
     if (!(origin ? allowedOrigins.has(origin) : allowOriginless)) { reply(403, { error: 'Origin not allowed', requestId }); return; }
     if (req.method === 'OPTIONS') { reply(204, {}); return; }
