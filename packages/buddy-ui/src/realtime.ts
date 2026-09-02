@@ -186,11 +186,13 @@ export class RealtimeVoiceClient {
       const session = await this.options.provider.createSession(sdp, locale);
       if (this.stopped || peer !== this.peer) return;
       this.updateDiagnostics({ model: session.model, voice: session.voice, vadMode: session.vadMode, sessionRequestId: session.requestId });
-      clearTimeout(this.expiryTimer);
-      this.expiryTimer = setTimeout(() => {
-        this.options.onError?.('Voice Mode ended after the session time limit.', 'SESSION_LIMIT_REACHED');
-        this.stop();
-      }, session.maxSessionSeconds * 1_000);
+      if (!this.expiryTimer) {
+        this.expiryTimer = setTimeout(() => {
+          this.options.onError?.('Voice Mode ended after the session time limit.', 'SESSION_LIMIT_REACHED');
+          this.updateDiagnostics({ lastSafeErrorCode: 'SESSION_LIMIT_REACHED' });
+          this.stop();
+        }, session.maxSessionSeconds * 1_000);
+      }
       await peer.setRemoteDescription({ type: 'answer', sdp: session.sdp });
       if (reconnecting) this.setState('RECONNECTING');
     } finally {

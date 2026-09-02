@@ -43,11 +43,11 @@ class FakePeer {
 
 const answer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n';
 
-function harness(overrides: { getUserMedia?: ReturnType<typeof vi.fn>; onToolRequest?: ReturnType<typeof vi.fn> } = {}) {
+function harness(overrides: { getUserMedia?: ReturnType<typeof vi.fn>; onToolRequest?: ReturnType<typeof vi.fn>; maxSessionSeconds?: number } = {}) {
   const stream = new FakeStream();
   const getUserMedia = overrides.getUserMedia ?? vi.fn(async () => stream as unknown as MediaStream);
   const peers: FakePeer[] = [];
-  const provider: RealtimeSessionProvider = { supported: true, createSession: vi.fn(async () => ({ requestId: 'req-safe', sdp: answer, model: 'gpt-realtime-2.1', voice: 'marin', vadMode: 'semantic_vad' as const, maxSessionSeconds: 900 })) };
+  const provider: RealtimeSessionProvider = { supported: true, createSession: vi.fn(async () => ({ requestId: 'req-safe', sdp: answer, model: 'gpt-realtime-2.1', voice: 'marin', vadMode: 'semantic_vad' as const, maxSessionSeconds: overrides.maxSessionSeconds ?? 900 })) };
   const states: RealtimeVoiceState[] = []; const transcripts: VoiceTranscriptUpdate[] = [];
   const audio = { autoplay: false, srcObject: null, setAttribute: vi.fn(), play: vi.fn(async () => undefined), pause: vi.fn(), remove: vi.fn() } as unknown as HTMLAudioElement;
   const onToolRequest = overrides.onToolRequest ?? vi.fn(async () => ({ status: 'completed' as const, message: 'Safe result' }));
@@ -142,6 +142,17 @@ describe('RealtimeVoiceClient', () => {
     const first = subject.peers[0]; if (!first) throw new Error('Missing peer.'); first.connectionState = 'failed'; first.onconnectionstatechange?.();
     await vi.advanceTimersByTimeAsync(2_100);
     expect(subject.peers).toHaveLength(3); expect(subject.states).toContain('RECONNECTING'); expect(subject.states).toContain('ERROR'); expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentDiagnostics.reconnectAttempt).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it('keeps one activation-wide session deadline across a reconnect', async () => {
+    vi.useFakeTimers();
+    const subject = harness({ maxSessionSeconds: 60 }); await subject.client.start('en'); subject.peers[0]?.channel.open();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const first = subject.peers[0]; if (!first) throw new Error('Missing peer.'); first.connectionState = 'disconnected'; first.onconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(500); subject.peers[1]?.channel.open();
+    await vi.advanceTimersByTimeAsync(29_499); expect(subject.stream.track.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('SESSION_LIMIT_REACHED'); expect(subject.client.currentState).toBe('IDLE');
     vi.useRealTimers();
   });
 });
