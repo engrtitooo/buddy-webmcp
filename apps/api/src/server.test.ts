@@ -1,8 +1,9 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AGENT_LIMITS, type AgentNextInput } from '@buddy/shared';
 import { OPENAI_DECISION_SCHEMA, normalizeOpenAIModelDecision } from './openai';
-import { MemoryRateLimiter, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
+import { MemoryRateLimiter, RequestError, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
 
 const origin = 'https://client.example';
 const tool = { name: 'search', description: 'Search', origin, annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } };
@@ -41,6 +42,32 @@ describe('parseAgentNextInput', () => {
   it('accepts bounded rejected-call feedback for a nonexistent tool', () => {
     expect(parseAgentNextInput({ ...payload, observations: [{ callId: '1', toolName: 'missing', args: {}, outcome: 'rejected', error: 'Use an available tool.' }] }).observations[0]).toMatchObject({ toolName: 'missing', outcome: 'rejected' });
   });
+  it('accepts empty, list, required-string, and subscription object schemas', () => {
+    const tools = [
+      { name: 'get_site_info', description: 'Get site info', origin: 'https://cloverbase.com', inputSchema: { type: 'object', properties: {} } },
+      { name: 'list_posts', title: 'List posts', description: 'List posts', origin: 'https://cloverbase.com', inputSchema: { type: 'object', properties: { limit: { type: 'integer' } } } },
+      { name: 'search_posts', description: 'Search posts', origin: 'https://cloverbase.com', annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+      { name: 'subscribe_newsletter', description: 'Subscribe', origin: 'https://cloverbase.com', inputSchema: { type: 'object', properties: { email: { type: 'string' } }, required: ['email'] } },
+    ];
+    const result = parseAgentNextInput({ ...payload, sessionId: 'b8d90c28-5432-45fb-921d-7245ea90c3fb', goal: 'Show what you can do', tools, observations: [] });
+    expect(result.tools).toHaveLength(4); expect(result.observations).toEqual([]);
+  });
+  it('accepts omitted title and annotations and canonicalizes a valid origin', () => {
+    const result = parseAgentNextInput({ ...payload, tools: [{ name: 'get_site_info', description: 'Info', origin: 'https://cloverbase.com/path?ignored=1', inputSchema: { type: 'object' } }] });
+    expect(result.tools[0]).toEqual({ name: 'get_site_info', description: 'Info', origin: 'https://cloverbase.com', inputSchema: { type: 'object' } });
+  });
+  it('rejects malformed and oversized schemas at the tool-schema stage', () => {
+    for (const inputSchema of [{ type: 'not-a-json-schema-type' }, { type: 'object', description: 'x'.repeat(AGENT_LIMITS.maxSchemaBytes) }]) {
+      let thrown: unknown;
+      try { parseAgentNextInput({ ...payload, tools: [{ ...tool, inputSchema }] }); } catch (error) { thrown = error; }
+      expect(thrown).toBeInstanceOf(RequestError);
+      expect(thrown).toMatchObject({ errorCode: 'INVALID_TOOL_SCHEMA', validationStage: 'tool_schema', toolName: 'search' });
+    }
+  });
+  it('rejects prototype-pollution keys in schemas', () => {
+    const inputSchema = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}') as Record<string, unknown>;
+    expect(() => parseAgentNextInput({ ...payload, tools: [{ ...tool, inputSchema }] })).toThrow(/schema/i);
+  });
 });
 
 describe('production environment', () => {
@@ -76,7 +103,7 @@ describe('Buddy API', () => {
   });
   it('serves a credential-free health check', async () => {
     const base = await start(createBuddyServer({ apiKey: '' })); const response = await fetch(`${base}/health`);
-    expect(response.status).toBe(200); await expect(response.json()).resolves.toEqual({ status: 'ok' });
+    expect(response.status).toBe(200); await expect(response.json()).resolves.toMatchObject({ status: 'ok', contractVersion: 2, commit: expect.any(String) });
   });
   it('rejects callers outside the exact origin allowlist', async () => {
     const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test' }));
@@ -110,6 +137,36 @@ describe('Buddy API', () => {
     expect(schema).not.toHaveProperty('anyOf'); expect(schema).not.toHaveProperty('oneOf'); expectClosedObjectSchemas(schema);
     expect(schema.required).toEqual(['kind', 'toolName', 'argsJson', 'label', 'reason', 'message']);
     expect(Object.keys(schema.properties as Record<string, unknown>)).not.toEqual(expect.arrayContaining(['args', 'risk', 'callId']));
+  });
+
+  it('lets “Show what you can do” reach the provider boundary on turn zero', async () => {
+    let providerInput: AgentNextInput | undefined;
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { input: string };
+      providerInput = JSON.parse(body.input) as AgentNextInput;
+      return new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'final', toolName: null, argsJson: null, label: null, reason: null, message: 'Here is what I can do.' }) }), { status: 200 });
+    }) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, sessionId: '4072cc55-e39a-4df7-889f-aae31886befd', goal: 'Show what you can do', observations: [] }) });
+    expect(response.status).toBe(200); expect(providerInput).toMatchObject({ turn: 0, goal: 'Show what you can do', observations: [] });
+  });
+
+  it.each(['What can you do here?', 'Explain what this site lets you do.', 'Help me choose.'])('allows a conversational final response for “%s” without forcing a tool call', async (goal) => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ output_text: JSON.stringify({ kind: 'final', toolName: null, argsJson: null, label: null, reason: null, message: 'I can explain the available options.' }) }), { status: 200 })) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, goal }) });
+    expect(response.status).toBe(200); expect(await response.json()).toEqual({ kind: 'final', message: 'I can explain the available options.' });
+  });
+
+  it('returns and logs safe validation diagnostics without logging the goal', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test' }));
+    const secretGoal = 'private user wording';
+    const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, goal: secretGoal, tools: [{ ...tool, inputSchema: 'serialized-at-the-wrong-boundary' }] }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ requestId: expect.any(String), error: { code: 'INVALID_TOOL_SCHEMA', validationStage: 'tool_schema', toolName: 'search' } });
+    const log = info.mock.calls.map(([entry]) => String(entry)).join('\n');
+    expect(log).toContain('"errorCode":"INVALID_TOOL_SCHEMA"'); expect(log).toContain('"validationStage":"tool_schema"'); expect(log).not.toContain(secretGoal);
   });
 
   it('normalizes valid tool_call, final, and needs_input envelopes', () => {

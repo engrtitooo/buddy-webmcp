@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import { Activity, Bot, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, Mic, MicOff, Send, Settings, Sparkles, Volume2, VolumeX, X } from 'lucide-react';
 import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, normalizeAgentDecisionOrRejection, type AgentProvider } from '@buddy/agent-core';
 import { detectLocale, directionFor, messages } from '@buddy/localization';
-import { AGENT_LIMITS, DEFAULT_RULES, safeJson, type ActivityItem, type AgentDecision, type AgentObservation, type AgentRules, type BuddyState, type Locale, type PendingApproval, type PlanStep, type WebMCPTool } from '@buddy/shared';
+import { AGENT_LIMITS, AgentServiceError, DEFAULT_RULES, safeJson, type ActivityItem, type AgentDecision, type AgentObservation, type AgentRules, type BuddyState, type Locale, type PendingApproval, type PlanStep, type WebMCPTool } from '@buddy/shared';
 
 type Tab = 'chat' | 'activity' | 'capabilities' | 'settings';
 export type VoiceSubmissionMode = 'review' | 'auto';
@@ -28,6 +28,12 @@ export interface BuddySettingsStore {
 const defaults: StoredSettings = { locale: 'auto', muted: true, theme: 'system', developerMode: false, voiceSubmissionMode: 'review', rules: DEFAULT_RULES };
 const AVATAR_SIZE = 72;
 const VIEWPORT_MARGIN = 12;
+
+function developerErrorSuffix(error: unknown): string {
+  if (!(error instanceof AgentServiceError)) return '';
+  const detail = error.details;
+  return ` [${[detail.status ? `HTTP ${detail.status}` : undefined, detail.code, detail.validationStage, detail.toolName ? `tool ${detail.toolName}` : undefined, `request ${error.requestId}`].filter(Boolean).join(' · ')}]`;
+}
 
 function clampPosition(position: AvatarPosition): AvatarPosition {
   return {
@@ -236,7 +242,11 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
       }
       if (!run.controller.signal.aborted && activeRun.current?.id === run.id) throw new Error('Buddy reached its safe action limit and stopped.');
     } catch (error) {
-      if (!run.controller.signal.aborted) { setState('ERROR'); addMessage('assistant', `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'} No further action was taken.`); }
+      if (!run.controller.signal.aborted) {
+        setState('ERROR');
+        const suffix = settings.developerMode ? developerErrorSuffix(error) : '';
+        addMessage('assistant', `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'}${suffix} No further action was taken.`);
+      }
       stopRun(run);
     }
   };

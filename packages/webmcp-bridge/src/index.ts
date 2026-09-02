@@ -1,7 +1,7 @@
-import type { WebMCPTool } from '@buddy/shared';
+import { normalizeWebMCPTool, type WebMCPTool } from '@buddy/shared';
 
 export interface BrowserWebMCPAnnotations { readOnlyHint?: boolean; untrustedContentHint?: boolean }
-export interface BrowserRegisteredTool { name: string; title?: string; description: string; inputSchema?: Record<string, unknown>; window: Window; origin: string; annotations?: BrowserWebMCPAnnotations }
+export interface BrowserRegisteredTool { name: string; title?: string; description: string; inputSchema?: Record<string, unknown> | string; window: Window; origin: string; annotations?: BrowserWebMCPAnnotations }
 export interface BrowserToolDefinition { name: string; title?: string; description: string; inputSchema?: Record<string, unknown>; annotations?: BrowserWebMCPAnnotations; execute(input: Record<string, unknown>, options: { signal: AbortSignal }): unknown | Promise<unknown> }
 export interface BrowserModelContext extends EventTarget {
   registerTool(tool: BrowserToolDefinition, options?: { signal?: AbortSignal; exposedTo?: string[] }): Promise<void>;
@@ -11,6 +11,28 @@ export interface BrowserModelContext extends EventTarget {
 declare global { interface Document { readonly modelContext?: BrowserModelContext } }
 
 export type ToolChangeListener = (tools: WebMCPTool[]) => void;
+
+/**
+ * The single boundary from browser-owned RegisteredTool handles to Buddy's
+ * canonical, JSON-only tool contract. Chrome builds have exposed inputSchema
+ * both as a parsed object and as its serialized JSON form.
+ */
+export function normalizeRegisteredTool(tool: BrowserRegisteredTool, fallbackOrigin: string): WebMCPTool | undefined {
+  let inputSchema: unknown = tool.inputSchema;
+  if (typeof inputSchema === 'string') {
+    try { inputSchema = JSON.parse(inputSchema) as unknown; } catch { return undefined; }
+  }
+  try {
+    return normalizeWebMCPTool({
+      name: tool.name,
+      title: tool.title,
+      description: tool.description,
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
+      origin: tool.origin || fallbackOrigin,
+      annotations: tool.annotations,
+    });
+  } catch { return undefined; }
+}
 
 export class WebMCPAdapter {
   private registered = new Map<string, BrowserRegisteredTool>();
@@ -32,15 +54,17 @@ export class WebMCPAdapter {
       if (contextDisappeared) this.revision += 1;
     }
     if (!context) return [];
-    const tools = (await context.getTools()).filter((tool) => typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128 && typeof tool.description === 'string' && tool.description.length <= 2_000).slice(0, 64);
-    const unique = tools.filter((tool, index) => tools.findIndex((candidate) => candidate.name === tool.name) === index);
-    const exposed = unique.map(({ name, title, description, inputSchema, origin, annotations }) => ({
-      name, ...(title ? { title } : {}), description, ...(inputSchema ? { inputSchema } : {}), origin: origin || location.origin,
-      ...(annotations ? { annotations: { ...annotations } } : {}),
-    }));
+    const normalized: Array<{ registered: BrowserRegisteredTool; exposed: WebMCPTool }> = [];
+    const names = new Set<string>();
+    for (const registered of (await context.getTools()).slice(0, 64)) {
+      const exposed = normalizeRegisteredTool(registered, location.origin);
+      if (!exposed || names.has(exposed.name)) continue;
+      names.add(exposed.name); normalized.push({ registered, exposed });
+    }
+    const exposed = normalized.map((item) => item.exposed);
     const nextSignature = JSON.stringify(exposed);
     if (nextSignature !== this.signature) {
-      this.registered = new Map(unique.map((tool) => [tool.name, tool]));
+      this.registered = new Map(normalized.map((item) => [item.exposed.name, item.registered]));
       this.signature = nextSignature;
       this.revision += 1;
     }

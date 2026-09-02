@@ -1,6 +1,7 @@
 import { MockAgentProvider, type AgentProvider } from '@buddy/agent-core';
 import {
   AGENT_NEXT_MESSAGE,
+  AgentServiceError,
   type AgentNextInput,
   type AgentNextRuntimeMessage,
   type AgentNextRuntimeResponse,
@@ -24,7 +25,9 @@ export class ExtensionAgentProvider implements AgentProvider {
         ])
       : await pending;
     if (!response || !response.ok) {
-      throw new Error(response?.error.retryable ? "Buddy's AI service is temporarily unavailable." : response?.error.message ?? 'Buddy could not reach its agent service.');
+      const requestId = response?.requestId ?? crypto.randomUUID();
+      const details = response?.error ?? { code: 'UNAVAILABLE' as const, message: 'Buddy could not reach its agent service.', retryable: true };
+      throw new AgentServiceError(details.message, requestId, details);
     }
     return response.decision;
   }

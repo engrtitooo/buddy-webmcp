@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { WebMCPAdapter } from './index';
+import { WebMCPAdapter, type BrowserRegisteredTool } from './index';
 
 describe('WebMCPAdapter', () => {
-  let tools: Array<{ name: string; description: string; origin: string; window: Window; annotations?: { readOnlyHint?: boolean } }>;
+  let tools: BrowserRegisteredTool[];
   let context: ModelContext;
   const cleanups: Array<() => void> = [];
 
@@ -48,6 +48,37 @@ describe('WebMCPAdapter', () => {
   it('filters malformed and duplicate tools', async () => {
     tools = [tools[0]!, { ...tools[0]!, description: 'duplicate' }, { name: '', description: 'bad', origin: 'https://example.com', window }];
     expect((await new WebMCPAdapter().getTools()).map((tool) => tool.name)).toEqual(['search']);
+  });
+  it('normalizes Chrome serialized schemas into plain JSON and never exposes Window or unknown fields', async () => {
+    tools = [{
+      name: 'search_posts',
+      title: 'Search posts',
+      description: 'Search posts',
+      origin: 'https://example.com/path?q=ignored',
+      window,
+      inputSchema: '{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}',
+      annotations: { readOnlyHint: true },
+      pageOwnedValue: window,
+    } as BrowserRegisteredTool & { pageOwnedValue: Window }];
+    const [serialized] = await new WebMCPAdapter().getTools();
+    expect(serialized).toEqual({
+      name: 'search_posts', title: 'Search posts', description: 'Search posts', origin: 'https://example.com',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      annotations: { readOnlyHint: true },
+    });
+    expect(JSON.stringify(serialized)).not.toContain('window');
+    expect(Object.getPrototypeOf(serialized?.inputSchema)).toBe(Object.prototype);
+  });
+  it('omits invalid optional metadata instead of rejecting a legitimate tool', async () => {
+    tools = [{ name: 'search', title: 42, description: 'Search', origin: 'https://example.com', window, annotations: { readOnlyHint: 'yes', extra: true } } as unknown as BrowserRegisteredTool];
+    expect(await new WebMCPAdapter().getTools()).toEqual([{ name: 'search', description: 'Search', origin: 'https://example.com' }]);
+  });
+  it('drops a malformed or unsafe schema before it can cross the extension boundary', async () => {
+    const cyclic: Record<string, unknown> = { type: 'object' }; cyclic.self = cyclic;
+    for (const inputSchema of ['{bad json', cyclic, JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}')]) {
+      tools = [{ name: 'unsafe', description: 'Unsafe', origin: 'https://example.com', window, inputSchema } as BrowserRegisteredTool];
+      await expect(new WebMCPAdapter().getTools()).resolves.toEqual([]);
+    }
   });
   it('discovers WebMCP when the API appears after initial page load', async () => {
     vi.useFakeTimers(); Object.defineProperty(document, 'modelContext', { configurable: true, value: undefined });

@@ -27,6 +27,7 @@ This code targets the current Community Group draft and Chrome 149 origin trial 
 - `annotations.readOnlyHint` and `annotations.untrustedContentHint`
 - `AbortController` signals for tool lifetime
 - JSON Schema input definitions and JSON-serializable structured results
+- compatibility normalization for Chrome `RegisteredTool.inputSchema` values exposed as either parsed objects or serialized JSON
 - feature detection and graceful unsupported-browser behavior
 
 Chrome's official security guidance states that extension content scripts can query and execute WebMCP tools. Buddy therefore reads the API directly from its isolated content-script world and does **not** expose a MAIN-world bridge or privileged message API to page JavaScript.
@@ -103,7 +104,7 @@ Its static content script runs on HTTP(S) pages but renders nothing until tools 
 
 `MockAgentProvider` is deterministic and reserved for tests or explicitly wired demos. The production extension never silently falls back to it.
 
-The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it with Ajv against the current WebMCP schema, recomputes risk, and generates the call ID locally. Invalid proposals become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
+The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The browser adapter first converts native `RegisteredTool` handles into a strict JSON-only contract: `window`, functions, prototypes, cycles, unknown properties, and browser objects never cross the boundary. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model may return a conversational `final` or `needs_input` response without calling a tool. It never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it with Ajv against the current WebMCP schema, recomputes risk, and generates the call ID locally. Invalid proposals become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
 
 ```bash
 cp .env.example .env

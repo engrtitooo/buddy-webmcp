@@ -1,14 +1,31 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { AGENT_LIMITS, type AgentNextInput, type WebMCPTool } from '@buddy/shared';
+import { validateToolSchema } from '@buddy/agent-core';
+import {
+  AGENT_CONTRACT_VERSION,
+  AGENT_LIMITS,
+  WebMCPToolValidationError,
+  normalizeWebMCPTool,
+  type AgentApiErrorResponse,
+  type AgentErrorCode,
+  type AgentNextInput,
+  type AgentValidationStage,
+  type WebMCPTool,
+} from '@buddy/shared';
 import { createOpenAIRequestBody, extractOpenAIOutputText, normalizeOpenAIModelDecision } from './openai';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const jsonLength = (value: unknown) => { try { return JSON.stringify(value).length; } catch { return Number.POSITIVE_INFINITY; } };
 
-class RequestError extends Error {
-  constructor(message: string, readonly status = 400) { super(message); }
+export class RequestError extends Error {
+  constructor(
+    message: string,
+    readonly errorCode: AgentErrorCode,
+    readonly validationStage: AgentValidationStage,
+    readonly status = 400,
+    readonly toolName?: string,
+  ) { super(message); }
 }
 
 export interface RateLimiter { allow(key: string, now?: number): boolean }
@@ -66,30 +83,42 @@ function configuredOrigins(): Set<string> {
 }
 
 function parseTools(value: unknown): WebMCPTool[] {
-  if (!Array.isArray(value) || value.length > AGENT_LIMITS.maxTools) throw new RequestError('Invalid tool inventory');
+  if (!Array.isArray(value) || value.length > AGENT_LIMITS.maxTools) throw new RequestError('Invalid tool inventory', 'INVALID_TOOL_INVENTORY', 'tool_inventory');
   const names = new Set<string>();
   return value.map((candidate) => {
-    if (!isRecord(candidate) || typeof candidate.name !== 'string' || !candidate.name.trim() || candidate.name.length > 128 || typeof candidate.description !== 'string' || candidate.description.length > 2_000) throw new RequestError('Invalid tool definition');
-    if (names.has(candidate.name)) throw new RequestError('Duplicate tool name'); names.add(candidate.name);
-    if (candidate.inputSchema !== undefined && (!isRecord(candidate.inputSchema) || jsonLength(candidate.inputSchema) > AGENT_LIMITS.maxSchemaBytes)) throw new RequestError('Invalid tool schema');
-    if (typeof candidate.origin !== 'string' || candidate.origin.length > 2_000) throw new RequestError('Invalid tool origin');
-    const annotations = isRecord(candidate.annotations) ? {
-      ...(typeof candidate.annotations.readOnlyHint === 'boolean' ? { readOnlyHint: candidate.annotations.readOnlyHint } : {}),
-      ...(typeof candidate.annotations.untrustedContentHint === 'boolean' ? { untrustedContentHint: candidate.annotations.untrustedContentHint } : {}),
-    } : undefined;
-    return { name: candidate.name, ...(typeof candidate.title === 'string' && candidate.title.length <= 240 ? { title: candidate.title } : {}), description: candidate.description, ...(candidate.inputSchema ? { inputSchema: candidate.inputSchema } : {}), origin: candidate.origin, ...(annotations ? { annotations } : {}) };
+    const candidateName = isRecord(candidate) && typeof candidate.name === 'string' ? candidate.name : undefined;
+    const diagnosticToolName = candidateName && candidateName.length <= 128 && /^[A-Za-z0-9_.-]+$/.test(candidateName) ? candidateName : undefined;
+    let tool: WebMCPTool;
+    try { tool = normalizeWebMCPTool(candidate); }
+    catch (error) {
+      if (error instanceof WebMCPToolValidationError) {
+        const [errorCode, stage] = error.reason === 'schema'
+          ? ['INVALID_TOOL_SCHEMA', 'tool_schema'] as const
+          : error.reason === 'origin'
+            ? ['INVALID_TOOL_ORIGIN', 'tool_origin'] as const
+            : ['INVALID_TOOL_DEFINITION', 'tool_definition'] as const;
+        throw new RequestError(error.message, errorCode, stage, 400, diagnosticToolName);
+      }
+      throw new RequestError('Invalid tool definition', 'INVALID_TOOL_DEFINITION', 'tool_definition', 400, diagnosticToolName);
+    }
+    if (names.has(tool.name)) throw new RequestError('Duplicate tool name', 'INVALID_TOOL_INVENTORY', 'tool_inventory', 400, tool.name);
+    names.add(tool.name);
+    try { validateToolSchema(tool); }
+    catch { throw new RequestError('Invalid tool schema', 'INVALID_TOOL_SCHEMA', 'tool_schema', 400, tool.name); }
+    return tool;
   });
 }
 
 export function parseAgentNextInput(value: unknown): AgentNextInput {
-  if (!isRecord(value) || typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 128) throw new RequestError('Invalid session');
-  if (!Number.isInteger(value.turn) || Number(value.turn) < 0 || Number(value.turn) >= AGENT_LIMITS.maxTurns) throw new RequestError('Invalid turn');
-  if (typeof value.goal !== 'string' || !value.goal.trim() || value.goal.length > AGENT_LIMITS.maxGoalLength) throw new RequestError('Invalid goal');
+  if (!isRecord(value)) throw new RequestError('Invalid request body', 'INVALID_REQUEST_BODY', 'request_body');
+  if (typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 128) throw new RequestError('Invalid session', 'INVALID_SESSION', 'session');
+  if (!Number.isInteger(value.turn) || Number(value.turn) < 0 || Number(value.turn) >= AGENT_LIMITS.maxTurns) throw new RequestError('Invalid turn', 'INVALID_TURN', 'turn');
+  if (typeof value.goal !== 'string' || !value.goal.trim() || value.goal.length > AGENT_LIMITS.maxGoalLength) throw new RequestError('Invalid goal', 'INVALID_GOAL', 'goal');
   const tools = parseTools(value.tools);
-  if (!Array.isArray(value.observations) || value.observations.length > AGENT_LIMITS.maxObservations) throw new RequestError('Invalid observations');
+  if (!Array.isArray(value.observations) || value.observations.length > AGENT_LIMITS.maxObservations) throw new RequestError('Invalid observations', 'INVALID_OBSERVATIONS', 'observations');
   const observations = value.observations.map((observation) => {
-    if (!isRecord(observation) || typeof observation.callId !== 'string' || observation.callId.length > 128 || typeof observation.toolName !== 'string' || !observation.toolName || observation.toolName.length > 128 || !isRecord(observation.args) || !['success', 'error', 'canceled', 'rejected'].includes(String(observation.outcome))) throw new RequestError('Invalid observation');
-    if ((observation.outcome !== 'rejected' && !tools.some((tool) => tool.name === observation.toolName)) || jsonLength(observation) > AGENT_LIMITS.maxResultCharacters + 20_000) throw new RequestError('Invalid observation');
+    if (!isRecord(observation) || typeof observation.callId !== 'string' || observation.callId.length > 128 || typeof observation.toolName !== 'string' || !observation.toolName || observation.toolName.length > 128 || !isRecord(observation.args) || !['success', 'error', 'canceled', 'rejected'].includes(String(observation.outcome))) throw new RequestError('Invalid observation', 'INVALID_OBSERVATIONS', 'observations');
+    if ((observation.outcome !== 'rejected' && !tools.some((tool) => tool.name === observation.toolName)) || jsonLength(observation) > AGENT_LIMITS.maxResultCharacters + 20_000) throw new RequestError('Invalid observation', 'INVALID_OBSERVATIONS', 'observations', 400, observation.toolName);
     return {
       callId: observation.callId, toolName: observation.toolName, args: observation.args, outcome: observation.outcome as 'success' | 'error' | 'canceled' | 'rejected',
       ...(observation.result !== undefined ? { result: observation.result } : {}), ...(typeof observation.error === 'string' ? { error: observation.error.slice(0, 1_000) } : {}),
@@ -100,8 +129,14 @@ export function parseAgentNextInput(value: unknown): AgentNextInput {
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   let raw = '';
-  for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > AGENT_LIMITS.maxPayloadBytes) throw new RequestError('Request too large', 413); }
-  try { return JSON.parse(raw) as unknown; } catch { throw new RequestError('Invalid JSON'); }
+  for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > AGENT_LIMITS.maxPayloadBytes) throw new RequestError('Request too large', 'PAYLOAD_TOO_LARGE', 'request_body', 413); }
+  try { return JSON.parse(raw) as unknown; } catch { throw new RequestError('Invalid JSON', 'INVALID_REQUEST_BODY', 'request_body'); }
+}
+
+function deploymentInfo(): { contractVersion: number; commit: string; branch?: string } {
+  const commit = process.env.RAILWAY_GIT_COMMIT_SHA?.trim() || process.env.GIT_COMMIT_SHA?.trim() || 'unknown';
+  const branch = process.env.RAILWAY_GIT_BRANCH?.trim();
+  return { contractVersion: AGENT_CONTRACT_VERSION, commit, ...(branch ? { branch } : {}) };
 }
 
 export function createBuddyServer(options: BuddyServerOptions = {}): Server {
@@ -116,21 +151,25 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
 
   return createServer(async (req, res) => {
     const started = Date.now(); const requestId = randomUUID(); const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-    const reply = (status: number, body: unknown) => {
+    const reply = (status: number, body: unknown, diagnostic?: { errorCode: AgentErrorCode; validationStage?: AgentValidationStage; toolName?: string }) => {
       const headers: Record<string, string> = { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-request-id': requestId, 'access-control-allow-headers': 'content-type,authorization', 'access-control-allow-methods': 'GET,POST,OPTIONS', vary: 'origin' };
       if (origin && allowedOrigins.has(origin)) headers['access-control-allow-origin'] = origin;
       res.writeHead(status, headers); res.end(status === 204 ? undefined : JSON.stringify(body));
-      console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path: req.url, status, durationMs: Date.now() - started }));
+      console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path: req.url, status, ...(diagnostic ?? {}), durationMs: Date.now() - started }));
+    };
+    const errorReply = (status: number, code: AgentErrorCode, message: string, validationStage?: AgentValidationStage, toolName?: string) => {
+      const body: AgentApiErrorResponse = { requestId, error: { code, message, ...(validationStage ? { validationStage } : {}), ...(toolName ? { toolName } : {}) } };
+      reply(status, body, { errorCode: code, ...(validationStage ? { validationStage } : {}), ...(toolName ? { toolName } : {}) });
     };
     if (req.url === '/' && req.method === 'GET') { reply(200, { name: 'Buddy WebMCP API', status: 'ok', health: '/health' }); return; }
-    if (req.url === '/health' && req.method === 'GET') { reply(200, { status: 'ok' }); return; }
-    if (!(origin ? allowedOrigins.has(origin) : allowOriginless)) { reply(403, { error: 'Origin not allowed', requestId }); return; }
+    if (req.url === '/health' && req.method === 'GET') { reply(200, { status: 'ok', ...deploymentInfo() }); return; }
+    if (!(origin ? allowedOrigins.has(origin) : allowOriginless)) { errorReply(403, 'ORIGIN_NOT_ALLOWED', 'Origin not allowed'); return; }
     if (req.method === 'OPTIONS') { reply(204, {}); return; }
     if (req.url !== '/agent/next' || req.method !== 'POST') { reply(404, { error: 'Not found', requestId }); return; }
-    if (!await auth.verify(req)) { reply(401, { error: 'Unauthorized', requestId }); return; }
-    if (!limiter.allow(req.socket.remoteAddress || 'unknown')) { reply(429, { error: 'Too many requests', requestId }); return; }
-    if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { reply(415, { error: 'Content-Type must be application/json', requestId }); return; }
-    if (!apiKey) { reply(503, { error: 'AI provider is not configured', requestId }); return; }
+    if (!await auth.verify(req)) { errorReply(401, 'UNAUTHORIZED', 'Unauthorized'); return; }
+    if (!limiter.allow(req.socket.remoteAddress || 'unknown')) { errorReply(429, 'RATE_LIMITED', 'Too many requests'); return; }
+    if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { errorReply(415, 'INVALID_REQUEST_BODY', 'Content-Type must be application/json', 'request_body'); return; }
+    if (!apiKey) { errorReply(503, 'PROVIDER_ERROR', 'AI provider is not configured', 'provider'); return; }
     try {
       const input = parseAgentNextInput(await readJsonBody(req));
       const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -140,14 +179,14 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
           headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
           body: JSON.stringify(createOpenAIRequestBody(input, model)),
         });
-        if (!response.ok) { reply(response.status === 429 ? 429 : 502, { error: 'Provider request failed', requestId }); return; }
+        if (!response.ok) { errorReply(response.status === 429 ? 429 : 502, response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', 'Provider request failed', 'provider'); return; }
         const text = extractOpenAIOutputText(await response.json()); if (!text) throw new Error('Empty provider result');
         const decision = normalizeOpenAIModelDecision(JSON.parse(text), input.tools); reply(200, decision);
       } finally { clearTimeout(timeout); }
     } catch (error) {
-      if (error instanceof RequestError) { reply(error.status, { error: error.message, requestId }); return; }
-      if (error instanceof DOMException && error.name === 'AbortError') { reply(504, { error: 'Provider request timed out', requestId }); return; }
-      reply(502, { error: 'Agent request failed', requestId });
+      if (error instanceof RequestError) { errorReply(error.status, error.errorCode, error.message, error.validationStage, error.toolName); return; }
+      if (error instanceof DOMException && error.name === 'AbortError') { errorReply(504, 'TIMEOUT', 'Provider request timed out', 'provider'); return; }
+      errorReply(502, 'PROVIDER_ERROR', 'Agent request failed', 'provider');
     }
   });
 }

@@ -104,11 +104,18 @@ function boundedJsonLength(value: unknown, limit: number): boolean {
   try { return JSON.stringify(value).length <= limit; } catch { return false; }
 }
 
+export function validateToolSchema(tool: Pick<WebMCPTool, 'name' | 'inputSchema'>): void {
+  if (!tool.inputSchema) return;
+  if (!boundedJsonLength(tool.inputSchema, AGENT_LIMITS.maxSchemaBytes)) throw new Error(`The ${tool.name} action schema is too large to validate safely.`);
+  try { ajv.compile(tool.inputSchema); }
+  catch { throw new Error(`The ${tool.name} action has an invalid schema, so Buddy stopped safely.`); }
+}
+
 export function validateToolArguments(tool: WebMCPTool, args: unknown): asserts args is Record<string, unknown> {
   if (!isRecord(args)) throw new Error(`The ${tool.name} action received invalid arguments.`);
   if (!boundedJsonLength(args, AGENT_LIMITS.maxPayloadBytes)) throw new Error(`The ${tool.name} action arguments are too large.`);
   if (!tool.inputSchema) return;
-  if (!boundedJsonLength(tool.inputSchema, AGENT_LIMITS.maxSchemaBytes)) throw new Error(`The ${tool.name} action schema is too large to validate safely.`);
+  validateToolSchema(tool);
   try {
     const validate = ajv.compile(tool.inputSchema);
     if (!validate(args)) {

@@ -4,6 +4,7 @@ import {
   type AgentNextInput,
   type AgentNextRuntimeResponse,
 } from '@buddy/shared';
+import { normalizeAgentApiFailure } from './api-errors';
 
 declare const __BUDDY_API_BASE_URL__: string;
 
@@ -36,8 +37,9 @@ async function requestNext(payload: AgentNextInput): Promise<AgentNextRuntimeRes
     });
     const requestId = response.headers.get('x-request-id') ?? fallbackRequestId;
     if (!response.ok) {
-      const code = response.status === 429 ? 'RATE_LIMITED' : response.status >= 500 ? 'UNAVAILABLE' : 'BAD_REQUEST';
-      return { ok: false, requestId, error: { code, message: response.status === 429 ? 'Buddy is busy. Please wait a moment and try again.' : 'Buddy could not safely plan the next action.', retryable: response.status === 429 || response.status >= 500 } };
+      let body: unknown;
+      try { body = await response.json(); } catch { body = undefined; }
+      return { ok: false, requestId, error: normalizeAgentApiFailure(response.status, body) };
     }
     return { ok: true, requestId, decision: await response.json() } as AgentNextRuntimeResponse;
   } catch (error) {
@@ -51,10 +53,10 @@ async function requestNext(payload: AgentNextInput): Promise<AgentNextRuntimeRes
 chrome.runtime.onMessage.addListener((message: unknown, sender) => {
   if (!isRecord(message) || message.type !== AGENT_NEXT_MESSAGE) return undefined;
   if (sender.id !== chrome.runtime.id || !sender.url || !/^https?:\/\//i.test(sender.url)) {
-    return Promise.resolve<AgentNextRuntimeResponse>({ ok: false, requestId: crypto.randomUUID(), error: { code: 'BAD_REQUEST', message: 'Untrusted request source.', retryable: false } });
+    return Promise.resolve<AgentNextRuntimeResponse>({ ok: false, requestId: crypto.randomUUID(), error: { code: 'INVALID_REQUEST_BODY', message: 'Untrusted request source.', retryable: false, validationStage: 'request_body' } });
   }
   if (!validPayload(message.payload)) {
-    return Promise.resolve<AgentNextRuntimeResponse>({ ok: false, requestId: crypto.randomUUID(), error: { code: 'BAD_REQUEST', message: 'Invalid agent request.', retryable: false } });
+    return Promise.resolve<AgentNextRuntimeResponse>({ ok: false, requestId: crypto.randomUUID(), error: { code: 'INVALID_REQUEST_BODY', message: 'Invalid agent request.', retryable: false, validationStage: 'request_body' } });
   }
   return requestNext(message.payload);
 });

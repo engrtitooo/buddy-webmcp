@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { readFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentProvider } from '@buddy/agent-core';
-import { DEFAULT_RULES, type AgentNextInput, type PlanStep, type WebMCPTool } from '@buddy/shared';
+import { AgentServiceError, DEFAULT_RULES, type AgentNextInput, type PlanStep, type WebMCPTool } from '@buddy/shared';
 import { BuddyApp, type BuddyAdapter, type BuddySettingsStore, type SpeechToTextProvider, type StoredSettings, type TextToSpeechProvider } from './index';
 
 const searchTool: WebMCPTool = { name: 'search_items', description: 'Search items', origin: 'https://shop.example', annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } };
@@ -121,6 +121,17 @@ describe('BuddyApp integration', () => {
     expect(container.textContent).toContain('I found the best option.');
   });
 
+  it.each([
+    ['What can you do here?', { kind: 'final', message: 'I can search and explain this site.' }],
+    ['Explain what this site lets you do.', { kind: 'final', message: 'This site exposes search.' }],
+    ['Help me choose.', { kind: 'needs_input', message: 'What matters most to you?' }],
+  ])('handles conversational prompt “%s” without forcing a site action', async (goal, response) => {
+    const provider = new QueueProvider([response]); const adapter = new FakeAdapter([searchTool]);
+    const container = await renderBuddy(adapter, provider); await submitGoal(container, goal);
+    expect(provider.inputs[0]).toMatchObject({ turn: 0, goal, observations: [] });
+    expect(adapter.execute).not.toHaveBeenCalled(); expect(container.textContent).toContain(response.message);
+  });
+
   it('asks for an unknown write and cancel guarantees no execution', async () => {
     const provider = new QueueProvider([{ kind: 'tool_call', toolName: 'frobnicate', args: { value: 1 }, label: 'Update item', reason: 'Continue', risk: 'READ' }]);
     const adapter = new FakeAdapter([writeTool]); const container = await renderBuddy(adapter, provider); await submitGoal(container);
@@ -160,6 +171,14 @@ describe('BuddyApp integration', () => {
     expect(malformed.textContent).toContain('invalid tool call');
     const unavailable = await renderBuddy(new FakeAdapter([searchTool]), new QueueProvider([new Error("Buddy's AI service is temporarily unavailable.")])); await submitGoal(unavailable);
     expect(unavailable.textContent).toContain("Buddy's AI service is temporarily unavailable");
+  });
+
+  it('shows request diagnostics only in Developer Mode', async () => {
+    const serviceError = () => new AgentServiceError('Buddy could not safely understand that request.', 'request-safe-id', { code: 'INVALID_TOOL_SCHEMA', message: 'Buddy could not safely understand that request.', retryable: false, status: 400, validationStage: 'tool_schema', toolName: 'search_items' });
+    const normal = await renderBuddy(new FakeAdapter([searchTool]), new QueueProvider([serviceError()])); await submitGoal(normal);
+    expect(normal.textContent).not.toContain('INVALID_TOOL_SCHEMA'); expect(normal.textContent).not.toContain('request-safe-id');
+    const developer = await renderBuddy(new FakeAdapter([searchTool]), new QueueProvider([serviceError()]), { store: makeStore({ developerMode: true }) }); await submitGoal(developer);
+    expect(developer.textContent).toContain('HTTP 400'); expect(developer.textContent).toContain('INVALID_TOOL_SCHEMA'); expect(developer.textContent).toContain('tool_schema'); expect(developer.textContent).toContain('request-safe-id');
   });
 
   it('reviews voice transcripts by default and auto-sends only when configured', async () => {
