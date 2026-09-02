@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createApprovalActionLabel, createApprovalArgumentRows, createApprovalSnapshot } from './index';
+import { createApprovalActionLabel, createApprovalArgumentRows, createApprovalSnapshot, upsertVoiceTranscript } from './index';
 
 describe('createApprovalSnapshot', () => {
   it('keeps the complete reviewed payload visible beyond 500 characters', () => {
@@ -34,5 +34,14 @@ describe('createApprovalSnapshot', () => {
   it('removes the raw tool identifier from an approval action label', () => {
     expect(createApprovalActionLabel('Add the best option (add_to_cart)', 'add_to_cart')).toBe('Add the best option');
     expect(createApprovalActionLabel('add_to_cart', 'add_to_cart')).toBe('Add to cart');
+  });
+});
+
+describe('upsertVoiceTranscript', () => {
+  it('uses one temporary message and replaces it with the final transcript', () => {
+    const partial = upsertVoiceTranscript([], { key: 'turn-1', role: 'user', text: 'Show the ', final: false });
+    const more = upsertVoiceTranscript(partial, { key: 'turn-1', role: 'user', text: 'latest articles', final: false });
+    const final = upsertVoiceTranscript(more, { key: 'turn-1', role: 'user', text: 'Show the latest articles.', final: true });
+    expect(final).toEqual([{ id: 'voice-user-turn-1', role: 'user', text: 'Show the latest articles.' }]);
   });
 });

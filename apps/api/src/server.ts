@@ -14,6 +14,15 @@ import {
   type WebMCPTool,
 } from '@buddy/shared';
 import { createOpenAIRequestBody, extractOpenAIOutputText, normalizeOpenAIModelDecision } from './openai';
+import {
+  MAX_REALTIME_SDP_BYTES,
+  createOpenAIRealtimeCall,
+  createRealtimeSafetyIdentifier,
+  parseRealtimeLocale,
+  realtimeConfig,
+  validateRealtimeSdp,
+  type RealtimeConfig,
+} from './realtime';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const jsonLength = (value: unknown) => { try { return JSON.stringify(value).length; } catch { return Number.POSITIVE_INFINITY; } };
@@ -62,6 +71,8 @@ export interface BuddyServerOptions {
   providerTimeoutMs?: number;
   apiKey?: string;
   model?: string;
+  realtimeRateLimiter?: RateLimiter;
+  realtime?: RealtimeConfig;
 }
 
 export function assertProductionEnvironment(environment: NodeJS.ProcessEnv = process.env): void {
@@ -133,6 +144,16 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   try { return JSON.parse(raw) as unknown; } catch { throw new RequestError('Invalid JSON', 'INVALID_REQUEST_BODY', 'request_body'); }
 }
 
+async function readSdpBody(req: IncomingMessage): Promise<string> {
+  let raw = '';
+  for await (const chunk of req) {
+    raw += chunk;
+    if (Buffer.byteLength(raw) > MAX_REALTIME_SDP_BYTES) throw new RequestError('SDP offer is too large', 'INVALID_SDP', 'request_body', 413);
+  }
+  if (!validateRealtimeSdp(raw)) throw new RequestError('Invalid SDP offer', 'INVALID_SDP', 'request_body');
+  return raw;
+}
+
 function deploymentInfo(): { contractVersion: number; commit: string; branch?: string } {
   const commit = process.env.RAILWAY_GIT_COMMIT_SHA?.trim() || process.env.GIT_COMMIT_SHA?.trim() || 'unknown';
   const branch = process.env.RAILWAY_GIT_BRANCH?.trim();
@@ -148,13 +169,15 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
   const timeoutMs = options.providerTimeoutMs ?? Math.max(1_000, Number(process.env.BUDDY_PROVIDER_TIMEOUT_MS || 20_000));
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   const model = options.model ?? process.env.OPENAI_MODEL ?? 'gpt-5.6-luna';
+  const realtime = options.realtime ?? realtimeConfig();
+  const realtimeLimiter = options.realtimeRateLimiter ?? new MemoryRateLimiter(realtime.sessionRateLimit, 60_000);
 
   return createServer(async (req, res) => {
     const started = Date.now(); const requestId = randomUUID(); const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-    const reply = (status: number, body: unknown, diagnostic?: { errorCode: AgentErrorCode; validationStage?: AgentValidationStage; toolName?: string }) => {
-      const headers: Record<string, string> = { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-request-id': requestId, 'access-control-allow-headers': 'content-type,authorization', 'access-control-allow-methods': 'GET,POST,OPTIONS', vary: 'origin' };
+    const reply = (status: number, body: unknown, diagnostic?: { errorCode: AgentErrorCode; validationStage?: AgentValidationStage; toolName?: string }, responseHeaders: Record<string, string> = {}) => {
+      const headers: Record<string, string> = { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-request-id': requestId, 'access-control-allow-headers': 'content-type,authorization,x-buddy-locale', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-expose-headers': 'x-request-id,x-buddy-realtime-model,x-buddy-realtime-voice,x-buddy-realtime-vad,x-buddy-realtime-max-session-seconds', vary: 'origin', ...responseHeaders };
       if (origin && allowedOrigins.has(origin)) headers['access-control-allow-origin'] = origin;
-      res.writeHead(status, headers); res.end(status === 204 ? undefined : JSON.stringify(body));
+      res.writeHead(status, headers); res.end(status === 204 ? undefined : typeof body === 'string' ? body : JSON.stringify(body));
       console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path: req.url, status, ...(diagnostic ?? {}), durationMs: Date.now() - started }));
     };
     const errorReply = (status: number, code: AgentErrorCode, message: string, validationStage?: AgentValidationStage, toolName?: string) => {
@@ -165,9 +188,47 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
     if (req.url === '/health' && req.method === 'GET') { reply(200, { status: 'ok', ...deploymentInfo() }); return; }
     if (!(origin ? allowedOrigins.has(origin) : allowOriginless)) { errorReply(403, 'ORIGIN_NOT_ALLOWED', 'Origin not allowed'); return; }
     if (req.method === 'OPTIONS') { reply(204, {}); return; }
-    if (req.url !== '/agent/next' || req.method !== 'POST') { reply(404, { error: 'Not found', requestId }); return; }
+    const agentRequest = req.url === '/agent/next' && req.method === 'POST';
+    const realtimeRequest = req.url === '/realtime/session' && req.method === 'POST';
+    if (!agentRequest && !realtimeRequest) { reply(404, { error: 'Not found', requestId }); return; }
     if (!await auth.verify(req)) { errorReply(401, 'UNAUTHORIZED', 'Unauthorized'); return; }
-    if (!limiter.allow(req.socket.remoteAddress || 'unknown')) { errorReply(429, 'RATE_LIMITED', 'Too many requests'); return; }
+    const clientKey = `${origin ?? 'originless'}:${req.socket.remoteAddress || 'unknown'}`;
+    if (!(realtimeRequest ? realtimeLimiter : limiter).allow(clientKey)) { errorReply(429, 'RATE_LIMITED', 'Too many requests'); return; }
+    if (realtimeRequest) {
+      if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/sdp')) { errorReply(415, 'INVALID_SDP', 'Content-Type must be application/sdp', 'request_body'); return; }
+      if (!apiKey) { errorReply(503, 'PROVIDER_ERROR', 'AI provider is not configured', 'provider'); return; }
+      try {
+        const sdp = await readSdpBody(req);
+        const locale = parseRealtimeLocale(req.headers['x-buddy-locale']);
+        const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await createOpenAIRealtimeCall({
+            apiKey,
+            sdp,
+            locale,
+            config: realtime,
+            safetyIdentifier: createRealtimeSafetyIdentifier(apiKey, origin, req.socket.remoteAddress),
+            fetchImpl,
+            signal: controller.signal,
+          });
+          if (!response.ok) { errorReply(response.status === 429 ? 429 : 502, response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', 'Realtime provider request failed', 'provider'); return; }
+          const answer = await response.text();
+          if (!validateRealtimeSdp(answer)) { errorReply(502, 'PROVIDER_ERROR', 'Realtime provider returned an invalid answer', 'provider'); return; }
+          reply(201, answer, undefined, {
+            'content-type': 'application/sdp',
+            'x-buddy-realtime-model': realtime.model,
+            'x-buddy-realtime-voice': realtime.voice,
+            'x-buddy-realtime-vad': 'semantic_vad',
+            'x-buddy-realtime-max-session-seconds': String(realtime.maxSessionSeconds),
+          });
+        } finally { clearTimeout(timeout); }
+      } catch (error) {
+        if (error instanceof RequestError) { errorReply(error.status, error.errorCode, error.message, error.validationStage); return; }
+        if (error instanceof DOMException && error.name === 'AbortError') { errorReply(504, 'TIMEOUT', 'Realtime provider request timed out', 'provider'); return; }
+        errorReply(502, 'PROVIDER_ERROR', 'Realtime session request failed', 'provider');
+      }
+      return;
+    }
     if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { errorReply(415, 'INVALID_REQUEST_BODY', 'Content-Type must be application/json', 'request_body'); return; }
     if (!apiKey) { errorReply(503, 'PROVIDER_ERROR', 'AI provider is not configured', 'provider'); return; }
     try {

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Buddy — Your Agentic Web Companion",
   "short_name": "Buddy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minimum_chrome_version": "149",
   "description": "The friendly interface for the agentic web.",
   "permissions": ["storage"],

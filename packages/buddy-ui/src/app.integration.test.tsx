@@ -184,9 +184,9 @@ describe('BuddyApp integration', () => {
   it('reviews voice transcripts by default and auto-sends only when configured', async () => {
     const speech: SpeechToTextProvider = { supported: true, listen: vi.fn(async () => 'Find headphones'), stop: vi.fn() };
     const reviewProvider = new QueueProvider([]); const review = await renderBuddy(new FakeAdapter([searchTool]), reviewProvider, { speech });
-    await click(review.querySelector('[aria-label="Use voice input"]')); expect((review.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Find headphones'); expect(reviewProvider.inputs).toHaveLength(0);
+    await click(review.querySelector('[aria-label="Start voice conversation"]')); expect((review.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Find headphones'); expect(reviewProvider.inputs).toHaveLength(0); expect(review.querySelector('.buddy-waveform')).not.toBeNull();
     const autoProvider = new QueueProvider([{ kind: 'final', message: 'Finished.' }]); const auto = await renderBuddy(new FakeAdapter([searchTool]), autoProvider, { speech, store: makeStore({ voiceSubmissionMode: 'auto' }) });
-    await click(auto.querySelector('[aria-label="Use voice input"]')); expect(autoProvider.inputs[0]?.goal).toBe('Find headphones'); expect(auto.textContent).toContain('Finished.');
+    await click(auto.querySelector('[aria-label="Start voice conversation"]')); expect(autoProvider.inputs[0]?.goal).toBe('Find headphones'); expect(auto.textContent).toContain('Finished.');
   });
 
   it('loads RTL and position settings, then persists keyboard and drag movement', async () => {

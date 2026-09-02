@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
-import { Activity, Bot, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, Mic, MicOff, Send, Settings, Sparkles, Volume2, VolumeX, X } from 'lucide-react';
+import { Activity, Bot, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, Send, Settings, Sparkles, Volume2, VolumeX, X } from 'lucide-react';
 import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, normalizeAgentDecisionOrRejection, type AgentProvider } from '@buddy/agent-core';
 import { detectLocale, directionFor, messages } from '@buddy/localization';
 import { AGENT_LIMITS, AgentServiceError, DEFAULT_RULES, safeJson, type ActivityItem, type AgentDecision, type AgentObservation, type AgentRules, type BuddyState, type Locale, type PendingApproval, type PlanStep, type WebMCPTool } from '@buddy/shared';
+import { RealtimeVoiceClient, type RealtimeDiagnostics, type RealtimeSessionProvider, type RealtimeVoiceState, type VoiceToolControls, type VoiceToolResult } from './realtime';
+
+export { RealtimeVoiceClient, microphoneConstraints, parseBuddyToolRequest, supportsOpenAIRealtime } from './realtime';
+export type { RealtimeBootstrapResult, RealtimeDiagnostics, RealtimeSessionProvider, RealtimeVoiceState, VoiceToolResult, VoiceTranscriptUpdate } from './realtime';
 
 type Tab = 'chat' | 'activity' | 'capabilities' | 'settings';
 export type VoiceSubmissionMode = 'review' | 'auto';
-interface ChatMessage { id: string; role: 'user' | 'assistant'; text: string }
+export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: string }
 export interface AvatarPosition { x: number; y: number }
 export interface StoredSettings { locale: Locale | 'auto'; muted: boolean; theme: 'light' | 'dark' | 'system'; developerMode: boolean; voiceSubmissionMode: VoiceSubmissionMode; rules: AgentRules; position?: AvatarPosition }
 type ToolCall = Extract<AgentDecision, { kind: 'tool_call' }>;
-interface RunContext { id: number; sessionId: string; goal: string; expectedRevision: number; nextTurn: number; observations: AgentObservation[]; guard: RepeatedToolCallGuard; controller: AbortController; pending: ToolCall | undefined }
+interface RunContext { id: number; sessionId: string; goal: string; expectedRevision: number; nextTurn: number; observations: AgentObservation[]; guard: RepeatedToolCallGuard; controller: AbortController; pending: ToolCall | undefined; voice: { resolve: (result: VoiceToolResult) => void; controls: VoiceToolControls } | undefined }
 
 export interface BuddyAdapter {
   isSupported(): boolean;
@@ -63,6 +67,15 @@ async function loadSettings(store: BuddySettingsStore): Promise<StoredSettings> 
 function boundedResult(value: unknown): unknown {
   const serialized = safeJson(value, AGENT_LIMITS.maxResultCharacters);
   try { return JSON.parse(serialized) as unknown; } catch { return serialized; }
+}
+
+export function upsertVoiceTranscript(items: ChatMessage[], update: { key: string; role: ChatMessage['role']; text: string; final: boolean }): ChatMessage[] {
+  const id = `voice-${update.role}-${update.key}`;
+  const index = items.findIndex((item) => item.id === id);
+  if (index < 0) return [...items, { id, role: update.role, text: update.text }];
+  const next = [...items]; const current = next[index];
+  if (current) next[index] = { ...current, text: update.final ? update.text : `${current.text}${update.text}` };
+  return next;
 }
 
 export function createApprovalSnapshot(args: Record<string, unknown>): { args: Record<string, unknown>; argumentsJson: string } {
@@ -151,18 +164,47 @@ function ApprovalCard({ approval, locale, developerMode, onApprove, onCancel }: 
   </section>;
 }
 
-export interface BuddyAppProps { adapter: BuddyAdapter; provider?: AgentProvider; siteName?: string; demoOpen?: boolean; speechProvider?: SpeechToTextProvider; voiceProvider?: TextToSpeechProvider; settingsStore?: BuddySettingsStore }
+export interface BuddyAppProps { adapter: BuddyAdapter; provider?: AgentProvider; realtimeProvider?: RealtimeSessionProvider; siteName?: string; demoOpen?: boolean; speechProvider?: SpeechToTextProvider; voiceProvider?: TextToSpeechProvider; settingsStore?: BuddySettingsStore }
 
-export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName = location.hostname, demoOpen = false, speechProvider, voiceProvider, settingsStore = browserSettingsStore }: BuddyAppProps) {
+export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtimeProvider, siteName = location.hostname, demoOpen = false, speechProvider, voiceProvider, settingsStore = browserSettingsStore }: BuddyAppProps) {
   const [tools, setTools] = useState<WebMCPTool[]>([]); const [state, setState] = useState<BuddyState>('SLEEPING');
   const [open, setOpen] = useState(demoOpen); const [tab, setTab] = useState<Tab>('chat'); const [input, setInput] = useState('');
   const [settings, setSettings] = useState<StoredSettings>(defaults); const [settingsLoaded, setSettingsLoaded] = useState(false); const [position, setPosition] = useState<AvatarPosition>();
   const [activity, setActivity] = useState<ActivityItem[]>([]); const [approval, setApproval] = useState<PendingApproval>();
   const [messagesList, setMessagesList] = useState<ChatMessage[]>([]); const [showNotice, setShowNotice] = useState(false);
+  const [voiceState, setVoiceState] = useState<RealtimeVoiceState>('IDLE'); const [voiceMode, setVoiceMode] = useState<'off' | 'realtime' | 'browser-fallback'>('off');
+  const [voiceDiagnostics, setVoiceDiagnostics] = useState<RealtimeDiagnostics>({ voiceMode: 'realtime', connectionState: 'IDLE', microphoneState: 'inactive', reconnectAttempt: 0 }); const [microphoneLevel, setMicrophoneLevel] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null); const mascotRef = useRef<HTMLButtonElement>(null); const activeRun = useRef<RunContext | undefined>(undefined); const runSequence = useRef(0); const suppressClick = useRef(false);
+  const realtimeRef = useRef<RealtimeVoiceClient | undefined>(undefined); const voiceToolHandler = useRef<((request: string, controls: VoiceToolControls) => Promise<VoiceToolResult>) | undefined>(undefined); const voiceModeRef = useRef(voiceMode);
   const drag = useRef<{ pointerId: number; startX: number; startY: number; origin: AvatarPosition; moved: boolean } | undefined>(undefined);
   const speech = useMemo(() => speechProvider ?? new BrowserSpeechToText(), [speechProvider]); const voice = useMemo(() => voiceProvider ?? new BrowserTextToSpeech(), [voiceProvider]);
   const locale = settings.locale === 'auto' ? detectLocale() : settings.locale; const t = messages[locale]; const capabilities = useMemo(() => new CapabilityMapper().map(tools), [tools]);
+
+  useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
+  useEffect(() => {
+    if (!realtimeProvider) return;
+    const client = new RealtimeVoiceClient({
+      provider: realtimeProvider,
+      onState: setVoiceState,
+      onDiagnostics: setVoiceDiagnostics,
+      onMicrophoneLevel: setMicrophoneLevel,
+      onError: (message, code) => {
+        setMessagesList((items) => [...items, { id: crypto.randomUUID(), role: 'assistant', text: message }]);
+        setVoiceDiagnostics((current) => ({ ...current, lastSafeErrorCode: code }));
+      },
+      onTranscript: ({ key, role, text, final }) => {
+        setMessagesList((items) => upsertVoiceTranscript(items, { key, role, text, final }));
+      },
+      onToolRequest: (request, controls) => voiceToolHandler.current?.(request, controls) ?? Promise.resolve({ status: 'failed', message: 'Buddy could not safely prepare that site action.' }),
+    });
+    realtimeRef.current = client;
+    return () => { client.stop(); if (realtimeRef.current === client) realtimeRef.current = undefined; };
+  }, [realtimeProvider]);
+  useEffect(() => {
+    const stopVoiceForPageExit = () => realtimeRef.current?.stop();
+    addEventListener('pagehide', stopVoiceForPageExit);
+    return () => removeEventListener('pagehide', stopVoiceForPageExit);
+  }, []);
 
   useEffect(() => { void loadSettings(settingsStore).then((loaded) => { setSettings(loaded); if (loaded.position) setPosition(clampPosition(loaded.position)); setSettingsLoaded(true); }); }, [settingsStore]);
   useEffect(() => { if (settingsLoaded) void settingsStore.save({ ...settings, ...(position ? { position } : {}) }); }, [position, settings, settingsLoaded, settingsStore]);
@@ -171,16 +213,16 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
     let unsubscribe: () => void = () => undefined; let active = true;
     const applyTools = (found: WebMCPTool[], changed: boolean) => {
       if (!active) return;
-      if (changed && activeRun.current) { activeRun.current.controller.abort(); activeRun.current = undefined; setApproval(undefined); }
+      if (changed && activeRun.current) { activeRun.current.voice?.resolve({ status: 'canceled', message: 'The site actions changed, so Buddy canceled the request.' }); activeRun.current.controller.abort(); activeRun.current = undefined; setApproval(undefined); }
       setTools(found);
-      if (!found.length) { setOpen(false); setShowNotice(false); setState('SLEEPING'); return; }
+      if (!found.length) { realtimeRef.current?.stop(); setVoiceMode('off'); setOpen(false); setShowNotice(false); setState('SLEEPING'); return; }
       setState('DETECTED'); setShowNotice(true);
     };
     const detect = async () => {
       try { applyTools(adapter.isSupported() ? await adapter.getTools() : [], false); unsubscribe = adapter.subscribe((updated) => applyTools(updated, true)); }
       catch { applyTools([], false); }
     };
-    void detect(); return () => { active = false; unsubscribe(); activeRun.current?.controller.abort(); };
+    void detect(); return () => { active = false; unsubscribe(); activeRun.current?.controller.abort(); realtimeRef.current?.stop(); };
   }, [adapter]);
   useEffect(() => { if (state === 'DETECTED') { const timer = setTimeout(() => setState('IDLE'), 900); return () => clearTimeout(timer); } }, [state]);
   useEffect(() => { if (showNotice) { const timer = setTimeout(() => setShowNotice(false), 4_000); return () => clearTimeout(timer); } }, [showNotice]);
@@ -192,7 +234,7 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
     document.addEventListener('pointermove', track, { passive: true }); return () => { cancelAnimationFrame(frame); document.removeEventListener('pointermove', track); };
   }, [tools.length]);
 
-  const addMessage = (role: ChatMessage['role'], text: string) => { setMessagesList((items) => [...items, { id: crypto.randomUUID(), role, text }]); if (role === 'assistant' && !settings.muted) voice.speak(text, locale); };
+  const addMessage = (role: ChatMessage['role'], text: string) => { setMessagesList((items) => [...items, { id: crypto.randomUUID(), role, text }]); if (role === 'assistant' && !settings.muted && voiceModeRef.current !== 'realtime') voice.speak(text, locale); };
   const updateActivity = (id: string, patch: Partial<ActivityItem>) => setActivity((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item));
   const stopRun = (run: RunContext) => { if (activeRun.current?.id === run.id) activeRun.current = undefined; };
 
@@ -208,7 +250,7 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
       if (run.controller.signal.aborted) throw error;
       const text = error instanceof Error ? error.message : 'The site could not complete that action.';
       updateActivity(call.callId, { status: 'failed', detail: text }); run.observations.push({ callId: call.callId, toolName: call.toolName, args: call.args, outcome: 'error', error: text });
-      setState('ERROR'); addMessage('assistant', `${text} I stopped safely.`); throw error;
+      setState('ERROR'); if (!run.voice) addMessage('assistant', `${text} I stopped safely.`); throw error;
     }
   };
 
@@ -220,7 +262,11 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
         const raw = await provider.next({ sessionId: run.sessionId, turn, goal: run.goal, tools, observations: run.observations }, run.controller.signal);
         if (adapter.getRevision() !== run.expectedRevision) throw new Error('The site actions changed. Please review a fresh request.');
         const decision = normalizeAgentDecisionOrRejection(raw, tools);
-        if (decision.kind === 'final' || decision.kind === 'needs_input') { addMessage('assistant', decision.message); setState(decision.kind === 'final' ? 'SUCCESS' : 'IDLE'); stopRun(run); return; }
+        if (decision.kind === 'final' || decision.kind === 'needs_input') {
+          if (run.voice) { run.voice.resolve({ status: 'completed', message: decision.message }); run.voice = undefined; }
+          else addMessage('assistant', decision.message);
+          setState(decision.kind === 'final' ? 'SUCCESS' : 'IDLE'); stopRun(run); return;
+        }
         if (decision.kind === 'rejected_tool_call') {
           run.guard.assertNew(decision);
           run.observations.push({ callId: decision.callId, toolName: decision.toolName, args: decision.args, outcome: 'rejected', error: decision.message });
@@ -232,11 +278,16 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
         const displayCall = { ...decision, label: actionLabel };
         setActivity((items) => [...items, { id: decision.callId, label: actionLabel, status: 'pending' }]);
         const permission = new PermissionEngine().evaluate(decision, settings.rules);
-        if (permission === 'BLOCK') { updateActivity(decision.callId, { status: 'canceled', detail: 'Blocked by your Buddy rules.' }); addMessage('assistant', `I stopped before “${actionLabel}” because your rules block this action.`); setState('IDLE'); stopRun(run); return; }
+        if (permission === 'BLOCK') {
+          const message = `I stopped before “${actionLabel}” because your rules block this action.`;
+          updateActivity(decision.callId, { status: 'canceled', detail: 'Blocked by your Buddy rules.' });
+          if (run.voice) { run.voice.resolve({ status: 'blocked', message }); run.voice = undefined; } else addMessage('assistant', message);
+          setState('IDLE'); stopRun(run); return;
+        }
         if (permission === 'ASK') {
           const reviewed = createApprovalSnapshot(decision.args);
           const reviewedCall = { ...displayCall, args: reviewed.args };
-          run.pending = reviewedCall; setApproval({ step: { id: reviewedCall.callId, toolName: reviewedCall.toolName, args: reviewedCall.args, label: reviewedCall.label, risk: reviewedCall.risk }, what: reviewedCall.label, why: reviewedCall.reason, argumentsJson: reviewed.argumentsJson, site: siteName, risk: reviewedCall.risk }); setState('WAITING_FOR_APPROVAL'); return;
+          run.pending = reviewedCall; setApproval({ step: { id: reviewedCall.callId, toolName: reviewedCall.toolName, args: reviewedCall.args, label: reviewedCall.label, risk: reviewedCall.risk }, what: reviewedCall.label, why: reviewedCall.reason, argumentsJson: reviewed.argumentsJson, site: siteName, risk: reviewedCall.risk }); setState('WAITING_FOR_APPROVAL'); run.voice?.controls.announceApprovalRequired(); return;
         }
         await executeCall(run, displayCall);
       }
@@ -245,60 +296,90 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), siteName
       if (!run.controller.signal.aborted) {
         setState('ERROR');
         const suffix = settings.developerMode ? developerErrorSuffix(error) : '';
-        addMessage('assistant', `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'}${suffix} No further action was taken.`);
+        const message = `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'}${suffix} No further action was taken.`;
+        if (run.voice) { run.voice.resolve({ status: 'failed', message }); run.voice = undefined; } else addMessage('assistant', message);
       }
       stopRun(run);
     }
   };
 
-  const sendGoal = async (goal: string) => {
-    const cleanGoal = goal.trim(); if (!cleanGoal || !tools.length) return;
-    activeRun.current?.controller.abort(); setApproval(undefined); addMessage('user', cleanGoal); setInput('');
-    const run: RunContext = { id: ++runSequence.current, sessionId: crypto.randomUUID(), goal: cleanGoal, expectedRevision: adapter.getRevision(), nextTurn: 0, observations: [], guard: new RepeatedToolCallGuard(), controller: new AbortController(), pending: undefined };
-    activeRun.current = run; await continueRun(run);
+  const sendGoal = async (goal: string, voiceControls?: VoiceToolControls): Promise<VoiceToolResult> => {
+    const cleanGoal = goal.trim(); if (!cleanGoal || !tools.length) return { status: 'failed', message: 'This site does not currently expose an action Buddy can use.' };
+    activeRun.current?.voice?.resolve({ status: 'canceled', message: 'A newer request replaced this one.' }); activeRun.current?.controller.abort(); setApproval(undefined);
+    if (!voiceControls) addMessage('user', cleanGoal); setInput('');
+    let resolveVoice: ((result: VoiceToolResult) => void) | undefined;
+    const result = voiceControls ? new Promise<VoiceToolResult>((resolve) => { resolveVoice = resolve; }) : undefined;
+    const run: RunContext = { id: ++runSequence.current, sessionId: crypto.randomUUID(), goal: cleanGoal, expectedRevision: adapter.getRevision(), nextTurn: 0, observations: [], guard: new RepeatedToolCallGuard(), controller: new AbortController(), pending: undefined, voice: voiceControls && resolveVoice ? { resolve: resolveVoice, controls: voiceControls } : undefined };
+    activeRun.current = run; void continueRun(run);
+    if (result) return result;
+    return { status: 'completed', message: 'Buddy finished the text request.' };
   };
+  voiceToolHandler.current = (request, controls) => sendGoal(request, controls);
   const submit = (event: FormEvent) => { event.preventDefault(); void sendGoal(input); };
   const approve = async () => {
     const run = activeRun.current; const call = run?.pending; if (!run || !call) return;
-    if (adapter.getRevision() !== run.expectedRevision) { run.controller.abort(); setApproval(undefined); setState('ERROR'); addMessage('assistant', 'The site actions changed before approval. I canceled the action.'); stopRun(run); return; }
+    if (adapter.getRevision() !== run.expectedRevision) { run.controller.abort(); setApproval(undefined); setState('ERROR'); const message = 'The site actions changed before approval. I canceled the action.'; if (run.voice) { run.voice.resolve({ status: 'canceled', message }); run.voice = undefined; } else addMessage('assistant', message); stopRun(run); return; }
     run.pending = undefined; setApproval(undefined);
     try { await executeCall(run, call); await continueRun(run); } catch { stopRun(run); }
   };
   const cancelApproval = () => {
     const run = activeRun.current; const call = run?.pending; if (call) updateActivity(call.callId, { status: 'canceled', detail: 'Canceled by you. Nothing was executed.' });
-    if (run) { run.controller.abort(); stopRun(run); } setApproval(undefined); setState('IDLE'); addMessage('assistant', 'Canceled. I did not perform that action.');
+    const wasVoice = Boolean(run?.voice);
+    if (run) { if (run.voice) { run.voice.resolve({ status: 'canceled', message: 'Canceled. I did not perform that action.' }); run.voice = undefined; } run.controller.abort(); stopRun(run); } setApproval(undefined); setState('IDLE'); if (!wasVoice) addMessage('assistant', 'Canceled. I did not perform that action.');
   };
   const listen = async () => {
     if (!speech.supported) { addMessage('assistant', 'Voice input is unavailable here, but you can type your goal.'); return; }
     setState('LISTENING'); try { const transcript = await speech.listen(locale); setState('IDLE'); if (settings.voiceSubmissionMode === 'auto') await sendGoal(transcript); else setInput(transcript); } catch (error) { setState('ERROR'); addMessage('assistant', error instanceof Error ? error.message : 'Voice input failed.'); }
   };
+  const stopVoice = () => { realtimeRef.current?.stop(); speech.stop(); voice.stop(); setVoiceMode('off'); setVoiceState('IDLE'); };
+  const toggleVoice = async () => {
+    if (voiceMode === 'realtime') { stopVoice(); return; }
+    if (voiceMode === 'browser-fallback') { await listen(); return; }
+    if (realtimeProvider?.supported && realtimeRef.current) {
+      setVoiceMode('realtime');
+      try { await realtimeRef.current.start(locale); return; }
+      catch (error) {
+        const reason = error instanceof DOMException && error.name === 'NotAllowedError' ? 'microphone-permission-denied' : error instanceof Error ? error.message : 'realtime-unavailable';
+        if (reason === 'microphone-permission-denied') { setVoiceMode('off'); return; }
+        setVoiceMode('browser-fallback'); setVoiceDiagnostics((current) => ({ ...current, voiceMode: 'browser-fallback', fallbackReason: reason }));
+        addMessage('assistant', 'Realtime voice is unavailable, so Buddy switched to browser voice fallback. Press the waveform again to speak.');
+        return;
+      }
+    }
+    setVoiceMode('browser-fallback'); setVoiceDiagnostics((current) => ({ ...current, voiceMode: 'browser-fallback', fallbackReason: 'webrtc-unsupported' }));
+    addMessage('assistant', 'Realtime voice is unavailable, so Buddy is using browser voice fallback.');
+    await listen();
+  };
 
   const onDragStart = (event: ReactPointerEvent<HTMLButtonElement>) => { const rect = event.currentTarget.getBoundingClientRect(); drag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: { x: rect.left, y: rect.top }, moved: false }; event.currentTarget.setPointerCapture(event.pointerId); };
   const onDragMove = (event: ReactPointerEvent<HTMLButtonElement>) => { const current = drag.current; if (!current || current.pointerId !== event.pointerId) return; const dx = event.clientX - current.startX; const dy = event.clientY - current.startY; if (Math.hypot(dx, dy) > 5) current.moved = true; if (current.moved) setPosition(clampPosition({ x: current.origin.x + dx, y: current.origin.y + dy })); };
   const onDragEnd = (event: ReactPointerEvent<HTMLButtonElement>) => { const current = drag.current; if (!current || current.pointerId !== event.pointerId) return; suppressClick.current = current.moved; drag.current = undefined; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); };
-  const onMascotActivate = () => { if (suppressClick.current) { suppressClick.current = false; return; } setOpen((value) => !value); };
+  const onMascotActivate = () => { if (suppressClick.current) { suppressClick.current = false; return; } setOpen((value) => { if (value) stopVoice(); return !value; }); };
   const onMascotKey = (event: KeyboardEvent<HTMLButtonElement>) => { const offsets: Record<string, [number, number]> = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }; const offset = offsets[event.key]; if (!offset) return; event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setPosition(clampPosition({ x: (position?.x ?? rect.left) + offset[0], y: (position?.y ?? rect.top) + offset[1] })); };
 
   if (!tools.length) return null;
   const tooltip = `${t.detected} ${t.found(capabilities.length)}`; const busy = state === 'EXECUTING' || state === 'THINKING';
-  return <div ref={rootRef} className={`buddy-root buddy-theme-${settings.theme}`} dir={directionFor(locale)} data-buddy-state={state}>
+  const voiceActive = voiceMode === 'realtime' && voiceState !== 'IDLE' && voiceState !== 'ERROR';
+  const voiceStatus: Partial<Record<RealtimeVoiceState, string>> = { CONNECTING: 'Connecting…', LISTENING: 'Listening…', USER_SPEAKING: 'Listening…', THINKING: 'Thinking…', BUDDY_SPEAKING: 'Speaking…', WAITING_FOR_APPROVAL: 'Waiting for approval…', RECONNECTING: 'Reconnecting…', STOPPING: 'Ending voice…', ERROR: 'Voice unavailable' };
+  const rootStyle = ({ '--buddy-voice-level': microphoneLevel.toFixed(2) } as CSSProperties);
+  return <div ref={rootRef} className={`buddy-root buddy-theme-${settings.theme}`} style={rootStyle} dir={directionFor(locale)} data-buddy-state={state} data-voice-state={voiceState}>
     {showNotice && !open && <div className="buddy-wake-notice" role="status">{t.detected}<span>{t.found(capabilities.length)}</span></div>}
     {open && <aside className="buddy-panel" aria-label="Buddy companion panel">
-      <header className="buddy-header"><div><span className="buddy-eyebrow">BUDDY</span><h2>{siteName}</h2><p><span className="buddy-site-dot active"/>{tools.length} site actions available</p></div><button className="buddy-icon-button" onClick={() => setOpen(false)} aria-label="Close Buddy"><X size={19}/></button></header>
+      <header className="buddy-header"><div><span className="buddy-eyebrow">BUDDY</span><h2>{siteName}</h2><p><span className="buddy-site-dot active"/>{tools.length} site actions available</p></div><button className="buddy-icon-button" onClick={() => { stopVoice(); setOpen(false); }} aria-label="Close Buddy"><X size={19}/></button></header>
       <nav className="buddy-tabs" aria-label="Buddy views" role="tablist">{(['chat','activity','capabilities','settings'] as Tab[]).map((item, index) => <button key={item} onClick={() => setTab(item)} aria-selected={tab === item} role="tab">{[<Bot key="chat"/>,<ListChecks key="activity"/>,<Sparkles key="capabilities"/>,<Settings key="settings"/>][index]}<span>{t.tabs[index]}</span></button>)}</nav>
       <div className="buddy-content">
         {tab === 'chat' && <div className="buddy-chat" aria-live="polite">{messagesList.map((message) => <div key={message.id} className={`buddy-message ${message.role}`}>{message.text}</div>)}{busy && <div className="buddy-thinking" role="status"><LoaderCircle/> {state === 'THINKING' ? 'Choosing the next safe action…' : 'Waiting for the site…'}</div>}{approval && <ApprovalCard approval={approval} locale={locale} developerMode={settings.developerMode} onApprove={() => void approve()} onCancel={cancelApproval}/>}</div>}
         {tab === 'activity' && <section><div className="buddy-section-title"><Activity/><div><h3>What Buddy did</h3><p>A clear trail, not a technical log.</p></div></div><div className="buddy-activity">{!activity.length && <p className="buddy-muted">Completed steps will appear here.</p>}{activity.map((item) => <div className="buddy-activity-item" key={item.id}><span className={`buddy-check ${item.status}`}>{item.status === 'done' ? <Check/> : item.status === 'failed' ? <CircleAlert/> : <ChevronRight/>}</span><div><strong>{item.label}</strong>{item.detail && <p>{item.detail}</p>}{settings.developerMode && item.technical && <details><summary>Technical details</summary><pre>{safeJson(item.technical, 900)}</pre></details>}</div></div>)}</div></section>}
         {tab === 'capabilities' && <section><div className="buddy-section-title"><Sparkles/><div><h3>What I can do here</h3><p>Translated into everyday language.</p></div></div><div className="buddy-capabilities">{capabilities.map((capability) => <article key={capability.id}><span>{capability.label}</span><p>{capability.description}</p>{settings.developerMode && <code>{capability.toolNames.join(', ')}</code>}</article>)}</div></section>}
-        {tab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} voiceSupported={speech.supported && voice.supported}/>}
+        {tab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} voiceSupported={Boolean(realtimeProvider?.supported || (speech.supported && voice.supported))} voiceDiagnostics={voiceDiagnostics}/>}
       </div>
-      {tab === 'chat' && <footer className="buddy-composer"><div className="buddy-suggestions"><button onClick={() => setInput('Show what you can do')}>Show what you can do</button><button onClick={() => setInput('Help me choose the best option')}>Help me choose</button></div><form onSubmit={submit}><label className="buddy-sr-only" htmlFor="buddy-goal">{t.placeholder}</label><textarea id="buddy-goal" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} rows={2} maxLength={AGENT_LIMITS.maxGoalLength}/><div className="buddy-compose-actions"><button type="button" className="buddy-icon-button" onClick={() => void listen()} aria-label="Use voice input">{state === 'LISTENING' ? <MicOff/> : <Mic/>}</button><button type="submit" className="buddy-send" disabled={!input.trim() || busy || state === 'WAITING_FOR_APPROVAL'} aria-label="Send goal"><Send/></button></div></form></footer>}
+      {tab === 'chat' && <footer className="buddy-composer"><div className="buddy-suggestions"><button onClick={() => setInput('Show what you can do')}>Show what you can do</button><button onClick={() => setInput('Help me choose the best option')}>Help me choose</button></div><form onSubmit={submit}><label className="buddy-sr-only" htmlFor="buddy-goal">{t.placeholder}</label><textarea id="buddy-goal" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} rows={2} maxLength={AGENT_LIMITS.maxGoalLength}/><div className="buddy-compose-actions"><button type="button" className={`buddy-voice-button voice-${voiceState.toLowerCase()}`} onClick={() => void toggleVoice()} aria-label={voiceActive ? 'End voice conversation' : 'Start voice conversation'} aria-pressed={voiceActive}><span className="buddy-waveform" aria-hidden="true">{[0,1,2,3,4].map((bar) => <i key={bar}/>)}</span></button><button type="submit" className="buddy-send" disabled={!input.trim() || busy || state === 'WAITING_FOR_APPROVAL'} aria-label="Send goal"><Send/></button></div></form>{(voiceActive || voiceMode === 'browser-fallback' || voiceState === 'ERROR') && <div className="buddy-voice-status" role="status"><span className={voiceActive ? 'active' : ''}/>{voiceMode === 'browser-fallback' ? 'Browser voice fallback' : voiceStatus[voiceState]}</div>}</footer>}
     </aside>}
     <Mascot state={state} onActivate={onMascotActivate} onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onKeyDown={onMascotKey} label={tooltip} buttonRef={mascotRef} position={position}/>
   </div>;
 }
 
-function SettingsView({ settings, setSettings, voiceSupported }: { settings: StoredSettings; setSettings: (value: StoredSettings) => void; voiceSupported: boolean }) {
+function SettingsView({ settings, setSettings, voiceSupported, voiceDiagnostics }: { settings: StoredSettings; setSettings: (value: StoredSettings) => void; voiceSupported: boolean; voiceDiagnostics: RealtimeDiagnostics }) {
   const setRule = (name: keyof AgentRules, value: boolean) => setSettings({ ...settings, rules: { ...settings.rules, [name]: value } });
   return <section className="buddy-settings"><div className="buddy-section-title"><Settings/><div><h3>My Buddy rules</h3><p>Your rules stay on this device.</p></div></div>
     <label>Language<select value={settings.locale} onChange={(event) => setSettings({ ...settings, locale: event.target.value as StoredSettings['locale'] })}><option value="auto">Auto</option><option value="en">English</option><option value="ar">العربية</option><option value="es">Español</option></select></label>
@@ -307,5 +388,6 @@ function SettingsView({ settings, setSettings, voiceSupported }: { settings: Sto
     <div className="buddy-rule-group"><h4>Ask me before</h4>{([['askBeforeSubmit','Submitting forms'],['askBeforeMessages','Sending messages'],['askBeforePurchase','Purchases or reservations'],['askBeforeSensitive','Sharing sensitive information'],['blockDelete','Deleting anything']] as const).map(([key,label]) => <label className="buddy-switch" key={key}><span>{label}</span><input type="checkbox" checked={settings.rules[key]} onChange={(event) => setRule(key, event.target.checked)}/><i/></label>)}</div>
     <label className="buddy-switch"><span>{settings.muted ? <VolumeX/> : <Volume2/>} Voice responses {!voiceSupported && '(unavailable)'}</span><input type="checkbox" checked={!settings.muted} disabled={!voiceSupported} onChange={(event) => setSettings({ ...settings, muted: !event.target.checked })}/><i/></label>
     <label className="buddy-switch"><span>Developer mode</span><input type="checkbox" checked={settings.developerMode} onChange={(event) => setSettings({ ...settings, developerMode: event.target.checked })}/><i/></label>
+    {settings.developerMode && <details className="buddy-voice-diagnostics"><summary>Realtime diagnostics</summary><pre>{safeJson(voiceDiagnostics, 1_500)}</pre></details>}
   </section>;
 }

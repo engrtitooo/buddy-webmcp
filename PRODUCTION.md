@@ -16,12 +16,29 @@ When `NODE_ENV=production`, the API fails before listening if either required va
 Recommended environment:
 
 - `OPENAI_MODEL=gpt-5.6-luna`
+- `OPENAI_REALTIME_MODEL=gpt-realtime-2.1`
+- `OPENAI_REALTIME_VOICE=marin`
 - `HOST=0.0.0.0` and the platform-provided `PORT`
 - `BUDDY_PROVIDER_TIMEOUT_MS=20000`
 - `BUDDY_RATE_LIMIT_MAX=30` and `BUDDY_RATE_LIMIT_WINDOW_MS=60000`
+- `BUDDY_REALTIME_MAX_SESSION_SECONDS=900`
+- `BUDDY_REALTIME_SESSION_RATE_LIMIT=10`
 - `BUDDY_API_AUTH_TOKEN` only for controlled/private clients. A public store extension should use a real gateway-issued identity rather than an embedded shared secret.
 
-The service exposes `GET /health` and `POST /agent/next`. `GET /health` returns the agent contract version and Railway's `RAILWAY_GIT_COMMIT_SHA` (plus its branch when available), so the running source can be compared with `main`. Put a public deployment behind TLS, authentication/attestation appropriate to the product, a durable distributed rate limiter, provider spend limits, and monitoring. The included in-memory limiter is a development baseline, not multi-instance infrastructure.
+For Railway, keep the existing `OPENAI_API_KEY`, `ALLOWED_ORIGINS`, `NODE_ENV=production`, `HOST=0.0.0.0`, and Railway-provided `PORT`. Add these optional values exactly:
+
+```text
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+OPENAI_REALTIME_VOICE=marin
+BUDDY_REALTIME_MAX_SESSION_SECONDS=900
+BUDDY_REALTIME_SESSION_RATE_LIMIT=10
+```
+
+The service exposes `GET /health`, `POST /agent/next`, and `POST /realtime/session`. The Realtime endpoint accepts only bounded `application/sdp`, checks the same origin/auth boundary, applies a dedicated session-creation limiter, and forwards a server-owned session through OpenAI's unified WebRTC interface. `GET /health` returns the agent contract version and Railway's `RAILWAY_GIT_COMMIT_SHA` (plus its branch when available), so the running source can be compared with `main`. Put a public deployment behind TLS, authentication/attestation appropriate to the product, a durable distributed rate limiter, provider spend limits, and monitoring. The included in-memory limiters are a development baseline, not multi-instance infrastructure.
+
+No new secret is required for Voice Mode. `OPENAI_API_KEY` remains server-side and is reused for both Responses and Realtime. The optional Realtime values above default safely when absent. The browser receives only an SDP answer and bounded non-secret diagnostics; it never receives the key, an authorization header, or arbitrary provider configuration.
+
+Voice Mode incurs paid Realtime audio and transcription usage for the duration of each connection. It is opt-in and client-cleaned at two minutes of speech inactivity or the configured session cap, but the included cap is enforced by the trusted extension after bootstrap. Treat provider project budgets, usage alerts, gateway authentication/attestation, and a durable distributed session limiter as the authoritative production cost controls. Chrome prompts for microphone access only after the waveform button is pressed; no `microphone` manifest permission is added.
 
 The model-facing Structured Output is a fixed root object with no root union and no additional properties. Tool arguments cross that boundary only as `argsJson`; the API parses the string, requires a plain object, validates it against the current tool schema, computes risk locally, and creates a local call ID before returning an internal decision.
 
@@ -84,6 +101,13 @@ Then open `chrome://extensions`, find Buddy, choose **Reload**, and refresh ever
 5. Ask to list posts, then search for a specific phrase. Confirm read-only calls execute and appear in Activity.
 6. Ask to subscribe an email address. Confirm Buddy shows an approval card and does not invoke `subscribe_newsletter` until **Approve once** is selected. Cancel once as a negative check and confirm nothing is submitted.
 7. In Developer Mode, if any request fails, record only its request ID, HTTP status, safe error code, validation stage, and tool name for correlation with Railway logs.
+8. Press the blue waveform button. Grant microphone permission and confirm the status moves from **Connecting…** to **Listening…**.
+9. Say **What can you do on this website?** and confirm Buddy answers with the OpenAI voice while both transcripts appear once in Chat.
+10. Continue speaking without pressing the button again, then interrupt Buddy mid-response. The remote response must stop without overlapping speech.
+11. Say **Show me the latest articles.** Confirm the read action passes through Activity and its result is spoken.
+12. Ask to subscribe to the newsletter. Confirm the visual approval card appears, spoken assent does nothing, **Cancel** executes nothing, and **Approve once** executes exactly once in a second trial.
+13. End Voice Mode and confirm Chrome's microphone indicator disappears. Send another text message and confirm `/agent/next` still returns HTTP 200.
+14. Open a normal non-WebMCP site. Buddy must remain hidden and must not invent actions or inspect the DOM.
 
 ## 3. Keep Buddy Market online
 
@@ -101,4 +125,4 @@ npm run lint
 npm run build
 ```
 
-Then build the extension once more in production mode with the real API URL, inspect `apps/extension/dist/manifest.json`, load it in Chrome, and verify: hidden on a normal site; visible on a WebMCP site; cancel performs no call; approval resumes once; tool removal cancels an in-flight run; voice defaults to transcript review.
+Then build extension version `0.1.1` once more in production mode with the real API URL, inspect `apps/extension/dist/manifest.json`, scan `content.js` and `background.js` for secrets, load it in Chrome, and run the Cloverbase text and continuous-voice checks above.

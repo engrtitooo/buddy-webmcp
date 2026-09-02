@@ -98,7 +98,7 @@ The extension uses one Chrome API permission:
 
 - `storage`: saves language, theme, voice preference, developer mode, and personal approval rules locally.
 
-Its static content script runs on HTTP(S) pages but renders nothing until tools exist. A service worker can contact only the build-time API origin in `host_permissions`. It requests no tabs, scripting, cookies, identity, browsing history, clipboard, microphone, or network-interception permission.
+Its static content script runs on HTTP(S) pages but renders nothing until tools exist. A service worker can contact only the build-time API origin in `host_permissions`. It requests no tabs, scripting, cookies, identity, browsing history, clipboard, microphone manifest permission, or network-interception permission. Chrome requests website microphone access through `getUserMedia` only after the user presses the waveform button.
 
 ## AI providers
 
@@ -130,7 +130,13 @@ WebMCP discovery uses adaptive fallback polling at 2, 5, 10, then 30 seconds whi
 
 ## Voice and localization
 
-Voice is provider-based. The MVP uses browser `SpeechRecognition`/`webkitSpeechRecognition` and `speechSynthesis`, defaults to an editable transcript review, offers an explicit auto-send setting, never auto-speaks unless enabled, and falls back to text when unavailable or denied.
+The primary Voice Mode is OpenAI Realtime speech-to-speech over WebRTC. Pressing the 48 px blue waveform button explicitly requests the microphone, starts one continuous session, uses semantic VAD, streams live user and assistant transcripts into Chat, plays the remote OpenAI voice track, and supports barge-in. English, Arabic, and Spanish follow the selected Buddy language; Arabic retains the existing RTL layout.
+
+The Railway API owns the Realtime model, `marin` voice, language and trust instructions, VAD, session cap, and the only internal voice function. A voice action request re-enters the same `/agent/next` safety loop used by text. Unknown, malformed, stale, blocked, or unapproved WebMCP actions cannot execute. `SpeechRecognition`/`webkitSpeechRecognition` and `speechSynthesis` are retained only as a visible browser fallback when WebRTC or Realtime is unavailable.
+
+Voice Mode stops its microphone tracks, peer connection, data channel, remote audio, analyser, listeners, and timers when ended, after two minutes without speech, if the microphone disappears, on page exit, or when Buddy closes. Developer Mode reports bounded connection diagnostics and fallback reason without SDP, raw audio, credentials, or sensitive content.
+
+Realtime input, output, and transcription consume paid OpenAI usage while Voice Mode is connected, even when no WebMCP action runs. Text-only use does not open a Realtime session. The explicit start, two-minute speech-idle timeout, 15-minute default cap, two reconnect attempts, and server bootstrap limiter bound accidental use; production should also use provider spend alerts and limits.
 
 Browser language is detected automatically. English, Arabic, and Spanish are implemented; Arabic switches the panel and conversation direction to RTL. Users can override language in Settings.
 

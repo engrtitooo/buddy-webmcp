@@ -218,11 +218,29 @@ export type AgentDecision =
   | { kind: 'needs_input'; message: string };
 
 export const AGENT_NEXT_MESSAGE = 'buddy.agent.next' as const;
+export const REALTIME_SESSION_MESSAGE = 'buddy.realtime.session' as const;
 
 export interface AgentNextRuntimeMessage {
   type: typeof AGENT_NEXT_MESSAGE;
   payload: AgentNextInput;
 }
+
+export interface RealtimeSessionRuntimeMessage {
+  type: typeof REALTIME_SESSION_MESSAGE;
+  payload: { sdp: string; locale: Locale };
+}
+
+export type RealtimeSessionRuntimeResponse =
+  | {
+      ok: true;
+      requestId: string;
+      sdp: string;
+      model: string;
+      voice: string;
+      vadMode: 'semantic_vad';
+      maxSessionSeconds: number;
+    }
+  | { ok: false; requestId: string; error: AgentRuntimeError };
 
 export type AgentErrorCode =
   | 'INVALID_REQUEST_BODY'
@@ -234,6 +252,7 @@ export type AgentErrorCode =
   | 'INVALID_TOOL_SCHEMA'
   | 'INVALID_TOOL_ORIGIN'
   | 'INVALID_OBSERVATIONS'
+  | 'INVALID_SDP'
   | 'PAYLOAD_TOO_LARGE'
   | 'UNAUTHORIZED'
   | 'ORIGIN_NOT_ALLOWED'

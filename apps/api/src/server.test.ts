@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AGENT_LIMITS, type AgentNextInput } from '@buddy/shared';
 import { OPENAI_DECISION_SCHEMA, normalizeOpenAIModelDecision } from './openai';
 import { MemoryRateLimiter, RequestError, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
+import { createRealtimeSessionConfig, realtimeConfig, validateRealtimeSdp } from './realtime';
 
 const origin = 'https://client.example';
 const tool = { name: 'search', description: 'Search', origin, annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } };
@@ -211,5 +212,64 @@ describe('Buddy API', () => {
     const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
     const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     expect(response.status).toBe(502); expect(await response.text()).not.toContain('secret provider detail');
+  });
+});
+
+describe('Buddy Realtime bootstrap', () => {
+  const offer = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n';
+  const answer = 'v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n';
+
+  it('builds a server-owned semantic VAD and internal-tool-only session', () => {
+    const session = createRealtimeSessionConfig(realtimeConfig({}), 'ar');
+    expect(session).toMatchObject({
+      model: 'gpt-realtime-2.1',
+      output_modalities: ['audio'],
+      audio: { input: { transcription: { model: 'gpt-live-transcribe' }, turn_detection: { type: 'semantic_vad', eagerness: 'auto', create_response: true, interrupt_response: true } }, output: { voice: 'marin' } },
+      tools: [{ type: 'function', name: 'buddy_webmcp_request' }],
+    });
+    expect(JSON.stringify(session)).toContain('Arabic');
+    expect(JSON.stringify(session)).not.toContain('executeTool');
+  });
+
+  it('forwards bounded SDP through the unified calls API without exposing the key', async () => {
+    let providerForm: FormData | undefined; let providerHeaders: Headers | undefined;
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      providerForm = init?.body as FormData; providerHeaders = new Headers(init?.headers);
+      return new Response(answer, { status: 201, headers: { 'content-type': 'application/sdp' } });
+    }) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'server-secret', fetchImpl }));
+    const response = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin, 'content-type': 'application/sdp', 'x-buddy-locale': 'es' }, body: offer });
+    expect(response.status).toBe(201); expect(await response.text()).toBe(answer);
+    expect(response.headers.get('x-buddy-realtime-model')).toBe('gpt-realtime-2.1'); expect(response.headers.get('x-buddy-realtime-voice')).toBe('marin');
+    expect(providerForm?.get('sdp')).toBe(offer);
+    const session = JSON.parse(String(providerForm?.get('session'))) as Record<string, unknown>;
+    expect(session).toMatchObject({ model: 'gpt-realtime-2.1', audio: { output: { voice: 'marin' } } }); expect(JSON.stringify(session)).toContain('Spanish');
+    expect(providerHeaders?.get('authorization')).toBe('Bearer server-secret');
+    expect(providerHeaders?.get('openai-safety-identifier')).toMatch(/^[a-f0-9]{64}$/);
+    expect(await (await fetch(`${base}/health`)).text()).not.toContain('server-secret');
+  });
+
+  it('rejects unapproved origins, malformed SDP, wrong media types, and bootstrap floods', async () => {
+    const fetchImpl = vi.fn(async () => new Response(answer, { status: 201 })) as typeof fetch;
+    const realtimeRateLimiter = new MemoryRateLimiter(2, 60_000);
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl, realtimeRateLimiter }));
+    const evil = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/sdp' }, body: offer }); expect(evil.status).toBe(403);
+    const malformed = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin, 'content-type': 'application/sdp' }, body: 'not-sdp' }); expect(malformed.status).toBe(400);
+    const wrongType = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' }); expect(wrongType.status).toBe(415);
+    const flooded = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin, 'content-type': 'application/sdp' }, body: offer }); expect(flooded.status).toBe(429);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized SDP offer before contacting OpenAI', async () => {
+    const fetchImpl = vi.fn(async () => new Response(answer, { status: 201 })) as typeof fetch;
+    const base = await start(createBuddyServer({ allowedOrigins: new Set([origin]), apiKey: 'test', fetchImpl }));
+    const response = await fetch(`${base}/realtime/session`, { method: 'POST', headers: { origin, 'content-type': 'application/sdp' }, body: `${offer}${'a'.repeat(64_000)}` });
+    expect(response.status).toBe(413); expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('validates SDP and optional config bounds without adding required secrets', () => {
+    expect(validateRealtimeSdp(offer)).toBe(true); expect(validateRealtimeSdp('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96')).toBe(false);
+    expect(realtimeConfig({ OPENAI_REALTIME_MODEL: 'gpt-realtime-2.1', OPENAI_REALTIME_VOICE: 'marin', BUDDY_REALTIME_MAX_SESSION_SECONDS: '1200', BUDDY_REALTIME_SESSION_RATE_LIMIT: '12' })).toEqual({ model: 'gpt-realtime-2.1', voice: 'marin', maxSessionSeconds: 1200, sessionRateLimit: 12 });
+    expect(() => realtimeConfig({ OPENAI_REALTIME_VOICE: 'not-a-voice' })).toThrow(/voice/);
   });
 });

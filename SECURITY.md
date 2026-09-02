@@ -29,6 +29,9 @@ The webpage, tool names, descriptions, schemas, and results are untrusted. The e
 - Consequential risk classes require approval by default; deletion is blocked by default
 - Approval shows complete human-readable values; raw JSON and raw tool names are Developer Mode-only, and Cancel never invokes the gated tool
 - No API key in browser code; loopback-only default, exact CORS allowlist, originless-request denial, bounded inputs, provider timeouts, request IDs, safe logs, an auth-verifier interface, and replaceable per-client rate limiting on the proxy. Production startup rejects missing secrets, localhost/insecure origins, and originless mode
+- Realtime accepts only bounded audio SDP through the fixed service-worker destination. The API owns model, voice, instructions, VAD, transcription, and the sole internal intent function; it applies separate session-creation limiting and returns no credential or arbitrary provider configuration
+- Realtime intent re-enters the existing agent loop. The model never receives native page handles, executable tool names, local risk authority, or approval authority; visual approval and current-inventory checks remain deterministic extension controls
+- Microphone capture requires an explicit waveform-button gesture. Device loss, speech inactivity, panel/page lifecycle, bounded reconnect exhaustion, and explicit stop release tracks, peer/data channel, remote audio, analyser, listeners, and timers
 - No full-page capture, browsing history, cookies, or hidden DOM automation
 - Developer diagnostics are opt-in and not persisted
 
@@ -37,6 +40,8 @@ The webpage, tool names, descriptions, schemas, and results are untrusted. The e
 WebMCP annotations are hints supplied by an untrusted site, so Buddy does not let `readOnlyHint` override obviously consequential names. A malicious site can still lie in its implementation or return adversarial text; users should judge the current site identity shown in Buddy's header. Model prompt-injection defenses reduce but cannot eliminate probabilistic model risk, so provider output is runtime-validated and approval remains a deterministic layer outside the model.
 
 The optional model proxy is safe for local development by default. Its in-memory limiter is not a distributed production control. Do not expose it directly to the public internet: place public deployments behind authenticated infrastructure with durable distributed rate limits, abuse controls, TLS, secret storage, and provider-usage monitoring.
+
+For unified WebRTC, the browser owns the media connection after a successful bootstrap. The server chooses the advertised session cap, but the trusted extension enforces that cap and the speech-idle timeout. A public deployment must not rely on client cleanup, CORS, or the in-memory bootstrap limiter as authoritative spend controls; use gateway identity/attestation, a distributed limiter, and provider budgets or alerts.
 
 ## Reporting
 
