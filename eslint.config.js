@@ -13,5 +13,5 @@ export default tseslint.config(
     plugins: { 'react-hooks': reactHooks },
     rules: { ...reactHooks.configs.recommended.rules, '@typescript-eslint/no-explicit-any': 'off' },
   },
-  { files: ['**/*.mjs'], languageOptions: { globals: globals.node } },
+  { files: ['**/*.mjs', '**/*.test.js'], languageOptions: { globals: globals.node } },
 );

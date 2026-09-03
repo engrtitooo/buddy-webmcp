@@ -15,7 +15,7 @@ describe('normalizeAgentApiFailure', () => {
 
   it('drops unrecognized or unsafe diagnostics', () => {
     expect(normalizeAgentApiFailure(400, { error: { code: 'SECRET_CODE', validationStage: 'internal_secret', toolName: '<script>' } })).toEqual({
-      code: 'INVALID_REQUEST_BODY',
+      code: 'HTTP_ERROR',
       message: 'Buddy could not safely understand that request.',
       retryable: false,
       status: 400,

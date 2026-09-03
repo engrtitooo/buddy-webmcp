@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "apps/api" },
     { "path": "packages/shared" },
     { "path": "packages/localization" },
     { "path": "packages/agent-core" },

@@ -7,6 +7,8 @@
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "build:production": "npm run build && npm run build:production -w @buddy/extension && npm run verify:production-manifest -w @buddy/extension",
+    "smoke:production": "node apps/api/smoke-production.mjs",
     "dev": "npm run dev -w @buddy/playground",
     "test": "vitest run",
     "typecheck": "tsc -b",

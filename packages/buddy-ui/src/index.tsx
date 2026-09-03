@@ -420,9 +420,9 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
       setVoiceMode('realtime');
       try { await realtimeRef.current.start(locale); return; }
       catch (error) {
-        const reason = error instanceof DOMException && error.name === 'NotAllowedError' ? 'microphone-permission-denied' : error instanceof Error ? error.message : 'realtime-unavailable';
+        const reason = error instanceof DOMException && error.name === 'NotAllowedError' ? 'microphone-permission-denied' : 'realtime-unavailable';
         if (reason === 'microphone-permission-denied') { setVoiceMode('off'); return; }
-        setVoiceMode('browser-fallback'); setVoiceDiagnostics((current) => ({ ...current, voiceMode: 'browser-fallback', fallbackReason: reason }));
+        setVoiceMode('browser-fallback'); setVoiceDiagnostics((current) => ({ ...current, voiceMode: 'browser-fallback', fallbackReason: current.lastSafeErrorCode ?? reason }));
         addMessage('assistant', 'Realtime voice is unavailable, so Buddy switched to browser voice fallback.');
         await listen();
         return;

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AgentServiceError } from '@buddy/shared';
 import { RealtimeVoiceClient, microphoneConstraints, parseBuddyToolRequest, type RealtimeSessionProvider, type RealtimeVoiceState, type VoiceTranscriptUpdate } from './realtime';
 
 class FakeTrack {
@@ -83,6 +84,21 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('RealtimeVoiceClient', () => {
+  it.each(['NETWORK_ERROR', 'TIMEOUT', 'HTTP_ERROR', 'ORIGIN_NOT_ALLOWED', 'UNAUTHORIZED', 'RATE_LIMITED', 'PROVIDER_ERROR'] as const)('keeps %s in safe bootstrap diagnostics', async (code) => {
+    const subject = harness();
+    vi.mocked(subject.provider.createSession).mockRejectedValue(new AgentServiceError('Voice Mode is temporarily unavailable.', 'request-safe-id', { code, message: 'Voice Mode is temporarily unavailable.', retryable: true, status: 503 }));
+    await expect(subject.client.start('en')).rejects.toBeInstanceOf(AgentServiceError);
+    expect(subject.client.currentDiagnostics).toMatchObject({ lastSafeErrorCode: code, sessionRequestId: 'request-safe-id', sessionHttpStatus: 503, sessionRequestSucceeded: false });
+    expect(subject.stream.track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('does not put arbitrary WebRTC exception text into diagnostics', async () => {
+    const subject = harness();
+    vi.mocked(subject.provider.createSession).mockRejectedValue(new Error('a=ice-pwd:secret credential'));
+    await expect(subject.client.start('en')).rejects.toThrow();
+    expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('REALTIME_UNAVAILABLE');
+    expect(JSON.stringify(subject.client.currentDiagnostics)).not.toContain('secret');
+  });
   it('requests the microphone only after explicit start and uses production audio constraints', async () => {
     const subject = harness(); expect(subject.getUserMedia).not.toHaveBeenCalled();
     await startAndOpen(subject);

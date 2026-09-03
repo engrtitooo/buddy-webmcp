@@ -83,35 +83,29 @@ packages/
 
 Full decisions are documented in [ARCHITECTURE.md](./ARCHITECTURE.md), the threat model in [SECURITY.md](./SECURITY.md), and the submission story in [HACKATHON.md](./HACKATHON.md).
 
-## Quick Start
+## Quick Start for judges (production)
 
-This is the shortest fully supported local-extension path. It uses the real OpenAI-backed agent, so an API key is required and remains server-side.
+Prerequisites: Node.js 22+ and Chrome 149+ with WebMCP enabled. The existing Railway API supplies text and voice; judges need no API key, local server, source edits, or extension-ID registration.
 
 1. Clone the repository and install dependencies:
 
    ```bash
    git clone https://github.com/engrtitooo/buddy-webmcp.git
    cd buddy-webmcp
-   npm install
+   npm ci
    ```
 
-2. Build the workspace. The development extension is configured for the local API at `http://127.0.0.1:8787`:
+2. Build and verify the production extension. It defaults to `https://buddy-mcp-production.up.railway.app`:
 
    ```bash
-   npm run build
+   npm run build:production
    ```
 
 3. In Chrome 149+, open `chrome://flags/#enable-webmcp-testing`, enable WebMCP testing support if required, and relaunch Chrome.
 
-4. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `apps/extension/dist`. Copy the generated extension ID shown by Chrome.
+4. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `apps/extension/dist`. If Buddy is already loaded, choose **Reload**, then refresh the test tab.
 
-5. Start the local API from PowerShell with the provider key and exact extension origin. Replace both placeholders; do not put the key in a browser bundle or commit it:
-
-   ```powershell
-   $env:OPENAI_API_KEY = 'your-server-side-key'
-   $env:ALLOWED_ORIGINS = 'chrome-extension://YOUR_EXTENSION_ID'
-   npm start -w @buddy/api
-   ```
+5. Confirm the public [API health check](https://buddy-mcp-production.up.railway.app/health) returns `status: ok`.
 
 6. Open the [live Buddy Market Playground](https://buddy-webmcp-market.engrtitooo.chatgpt.site/). Buddy should wake up and describe the available capabilities.
 
@@ -121,7 +115,7 @@ This is the shortest fully supported local-extension path. It uses the real Open
 
 8. Expected result: Buddy uses structured search/filter/compare actions, the marketplace UI visibly updates, Activity records readable steps, and Buddy pauses at an approval card before a consequential cart or checkout action. Cancel once to prove nothing executes, then repeat and approve once.
 
-The project owner can instead build against the deployed Railway API by setting `BUDDY_API_BASE_URL` and running the production extension build documented in [PRODUCTION.md](./PRODUCTION.md). That API must allow the exact generated `chrome-extension://` origin; a production API URL alone is not zero-setup access.
+`BUDDY_API_BASE_URL` is an optional build-time override. Leave it unset for the existing Railway service; a stale localhost override makes production builds fail clearly. Production builds require HTTPS and reject loopback addresses. See [PRODUCTION.md](./PRODUCTION.md) for the single deployment flow and origin-security rationale.
 
 ## Run locally
 
@@ -143,12 +137,12 @@ npm run lint
 npm run build
 ```
 
-CI also builds the extension in production mode against `https://api.example.com` and verifies that this is the only generated `host_permissions` entry. The validation artifact is not published.
+CI runs `npm run build:production` and verifies the default Railway host permission and the absence of localhost references. Development builds (`npm run build`, `npm run build -w @buddy/extension`, or extension watch mode) still default to `http://127.0.0.1:8787`. Always finish with the production command before loading an extension for judging.
 
 ## Load the Chrome extension
 
-1. Run `npm run build`.
-2. Start the local API with `OPENAI_API_KEY` set, or build against a deployed API as described in [PRODUCTION.md](./PRODUCTION.md).
+1. Run `npm run build:production` from the repository root.
+2. Use the already deployed Railway service as described in [PRODUCTION.md](./PRODUCTION.md).
 3. Open `chrome://extensions`.
 4. Enable **Developer mode**.
 5. Choose **Load unpacked**.
@@ -176,7 +170,7 @@ npm run build -w @buddy/api
 npm start -w @buddy/api
 ```
 
-The proxy binds to `127.0.0.1` by default, accepts only exact origins in `ALLOWED_ORIGINS`, rejects originless requests, and rate-limits clients. Add the exact Chrome extension origin when using a packaged extension. See [PRODUCTION.md](./PRODUCTION.md) for deployment and Chrome Web Store release steps. A public deployment must sit behind an authenticated, durably rate-limited gateway; CORS is not authentication.
+The local proxy binds to `127.0.0.1` and defaults to an exact origin allowlist. For local development, add the generated extension origin to `ALLOWED_ORIGINS`. The production service explicitly enables `BUDDY_EXTENSION_ORIGIN_POLICY=chrome-extensions` so judges can use their own installation IDs; ordinary web origins still require exact allowlisting, originless requests remain blocked, and authentication and rate limiting remain active. CORS is not authentication; see [PRODUCTION.md](./PRODUCTION.md) for the scope and limitations of this public demo policy.
 
 ## Approval and personal rules
 

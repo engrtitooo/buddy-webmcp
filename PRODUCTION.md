@@ -4,14 +4,15 @@ Buddy has three independently deployed pieces. The existing [Buddy Market](https
 
 ## 1. Deploy the API
 
-Deploy `apps/api` to a Node.js 22+ HTTPS service (for example Cloud Run, Render, Fly.io, Railway, or an equivalent container/runtime). Build with `npm ci` and `npm run build -w @buddy/api`, then start with `npm start -w @buddy/api`.
+Use the existing Railway **Buddy WebMCP → buddy-mcp → production** service at **https://buddy-mcp-production.up.railway.app**. Keep the GitHub source `engrtitooo/buddy-webmcp`, branch `main`, repository root, build command `npm ci && npm run build -w @buddy/api`, and start command `npm start -w @buddy/api`. Do not create a replacement service or change the public URLs.
 
 Required environment:
 
 - `OPENAI_API_KEY`: server secret; never put this in GitHub, the website, or the extension.
-- `ALLOWED_ORIGINS`: comma-separated exact HTTPS and/or `chrome-extension://` callers. Include the final `chrome-extension://<extension-id>` origin. CORS is not authentication.
+- `ALLOWED_ORIGINS`: comma-separated exact permitted HTTPS web origins (retain the existing trusted entries). Explicit Chrome extension origins may also be listed.
+- `BUDDY_EXTENSION_ORIGIN_POLICY=chrome-extensions`: permits valid Chrome extension origins for judges' independently loaded installations. No per-judge ID registration is required. Omission defaults to `allowlist` for local/private services.
 
-When `NODE_ENV=production`, the API fails before listening if either required value is absent, originless requests are enabled, an origin is malformed or insecure, or a localhost origin is configured.
+When `NODE_ENV=production`, the API fails before listening if the key or origin allowlist is absent, originless requests are enabled, an origin is malformed or insecure, or a localhost origin is configured. Invalid extension-policy values also fail; omission preserves the private allowlist default.
 
 Recommended environment:
 
@@ -61,20 +62,28 @@ The smoke test uses a synthetic tool and the same request builder as the API, pr
 6. Read `https://buddy-mcp-production.up.railway.app/health`. Compare its full `commit` value with the commit shown on GitHub for `main` (or local `git rev-parse origin/main`). Confirm `contractVersion` is `2`.
 7. Send the Cloverbase test request and locate its `requestId` in Railway logs. Correlate the safe `buddy_agent_turn`, `buddy_agent_decision`, `buddy_tool_validation_failed`, `buddy_agent_final`, and `buddy_realtime_session_created` events; goals, result bodies, credentials, and secret argument values are not logged.
 
-The pre-fix production health response was only `{"status":"ok"}`. That proves the deployed service did not yet have commit reporting, so an extension/API commit mismatch for the failing capture cannot be established retrospectively. After this deployment, the health fields make the check deterministic.
+Keep `/health` configured as Railway's deployment health check. It is public, does not call a paid provider, and discloses only status and source-version metadata. A healthy response confirms service availability; verify both provider routes separately.
 
 ## 2. Build and publish the extension
 
-Create a production bundle with an explicit HTTPS API endpoint:
+From the repository root, build the production bundle with the existing Railway default:
 
 ```powershell
-$env:BUDDY_API_BASE_URL = 'https://your-api.example.com'
-npm run build:production -w @buddy/extension
+npm ci
+npm run build:production
 ```
 
-The build fails if that variable is missing or not HTTPS. It writes the one API origin into `host_permissions`; the service worker never accepts a destination URL from page or content-script data.
+No environment variable is required. The root production command builds the workspace, rebuilds the extension in production mode, and verifies it. `BUDDY_API_BASE_URL` may override the default with another explicitly configured HTTPS service; empty/whitespace values use the mode default. Localhost (including subdomains and trailing dots), IPv4 loopback aliases, IPv6 loopback, credentials, query strings, fragments, and non-HTTPS production URLs fail before an existing bundle is replaced. Invalid build-mode names also fail.
 
-Public CI independently builds with the harmless `https://api.example.com` placeholder and verifies the generated manifest contains only `https://api.example.com/*`. That check validates packaging and does not publish the bundle.
+The default generated manifest contains exactly:
+
+```json
+"host_permissions": ["https://buddy-mcp-production.up.railway.app/*"]
+```
+
+Both `/agent/next` and `/realtime/session` use the service worker's compiled `API_BASE_URL`. Page content, tool definitions, message fields, and redirects cannot select a backend. Sender validation and all local approval rules remain active.
+
+CI runs the same root production command with no placeholder API URL. Build tests also exercise development, overrides, invalid destinations, generated permissions, and bundle contents. `verify:production-manifest` checks the expected compiled URL and rejects any localhost/127.0.0.1 reference in either script or the manifest.
 
 For local development, `npm run build -w @buddy/extension` uses `http://127.0.0.1:8787`. Load `apps/extension/dist` as an unpacked extension. After Chrome assigns its extension ID, add that exact origin to the API allowlist and restart the API.
 
@@ -85,12 +94,24 @@ For Chrome Web Store release, create the listing, privacy disclosure, screenshot
 ```powershell
 git pull --ff-only origin main
 npm ci
-$env:BUDDY_API_BASE_URL = 'https://buddy-mcp-production.up.railway.app'
-npm run build:production -w @buddy/extension
-npm run verify:production-manifest -w @buddy/extension
+npm run build:production
 ```
 
-Then open `chrome://extensions`, find Buddy version `0.1.2`, choose **Reload**, and refresh every open test tab. If loading it for the first time, choose **Load unpacked** and select `apps/extension/dist`. Confirm the extension ID's exact `chrome-extension://<id>` origin remains in Railway's `ALLOWED_ORIGINS`.
+Then open `chrome://extensions`, find Buddy version `0.1.2`, choose **Reload**, and refresh every open test tab. If loading it for the first time, choose **Load unpacked** and select `apps/extension/dist`. Judges need no server key, source edits, localhost replacement, or extension-ID registration. A previously loaded extension must be reloaded to pick up a new bundle; a server deployment cannot update files already loaded in Chrome.
+
+### Extension origin security
+
+The judging service opts into `chrome-extensions`, which accepts only the entire serialized origin matching `^chrome-extension://[a-p]{32}$`. Paths, ports, credentials, queries, malformed IDs, `null`, and originless requests are rejected. HTTPS web callers still need an exact `ALLOWED_ORIGINS` match; there is no wildcard web CORS. Accepted responses and preflights echo only the validated caller origin and include `Vary: Origin`.
+
+Chrome service-worker requests run under the extension origin with explicit host permission. An ordinary website cannot choose that browser-generated Origin header. Keeping destinations fixed in the service worker prevents a page from using it as an arbitrary network proxy; this follows [Chrome's cross-origin request guidance](https://developer.chrome.com/docs/extensions/develop/concepts/network-requests).
+
+This policy permits other installed Chrome extensions too; it is an explicit public-demo access policy, not proof of Buddy identity. Non-browser clients can forge Origin even under a fixed-ID allowlist. Authentication verification, payload limits, provider deadlines, and separate text/voice limiters remain in force. Extension quota buckets share the socket-address scope across IDs so rotating an ID does not reset them. Forwarded IP headers are not trusted; behind a reverse proxy, callers may conservatively share a bucket. In-memory quotas are per process and reset on restart. For broader public operation, use gateway-issued identities/attestation, durable distributed quotas, and provider budgets; never embed a shared secret in the extension. Operators can return to `allowlist` for a private deployment.
+
+### Safe connectivity diagnostics
+
+Normal users receive a short message and no action executes on a failed agent request. Opt-in Developer Mode distinguishes `NETWORK_ERROR` (fetch/transport failure), `TIMEOUT` (the 30-second client deadline or a server timeout), `HTTP_ERROR` (an unstructured HTTP failure), `ORIGIN_NOT_ALLOWED` (an explicit server origin rejection), `UNAUTHORIZED`, `RATE_LIMITED`, and `PROVIDER_ERROR`. Structured validation errors remain available. Voice bootstrap diagnostics preserve the same safe code, request ID, and HTTP status.
+
+The client allows the default 20-second server provider timeout to finish before aborting. CORS failures that the browser hides are reported honestly as `NETWORK_ERROR`; a blocked web page cannot read a 403 body. Diagnostics discard raw exception/server messages and arbitrary request-ID headers. They exclude authorization headers, keys, tokens, SDP/ICE credentials, audio, goals, and user content. Share only the safe code/status and UUID to correlate with Railway logs.
 
 ### Production regression checklist
 
@@ -130,7 +151,9 @@ npm ci
 npm run typecheck
 npm test
 npm run lint
-npm run build
+npm run build:production
 ```
 
-Then build extension version `0.1.2` once more in production mode with the real API URL, inspect `apps/extension/dist/manifest.json`, scan `content.js` and `background.js` for secrets, load it in Chrome, and run the Cloverbase, Rare Beauty, catalog, text, and continuous-voice checks above.
+After all checks pass, commit and push to the existing GitHub `main`, enable the judging origin policy on the existing Railway service, and deploy the latest commit. Verify `/health` reports that exact commit, `/agent/next` returns a valid decision for a synthetic goal, and `/realtime/session` returns a valid SDP answer for a generated WebRTC offer. Never log SDP or credentials. Re-run `npm run build:production` last, then load/reload `apps/extension/dist`. Keep generated `dist` untracked and do not create a GitHub Release. Interactive microphone, playback, and approval checks remain the browser checklist above.
+
+The opt-in `npm run smoke:production -- --expected-commit=<full-commit-sha>` performs those live checks, including preflights from two random valid extension IDs and rejection of arbitrary web/null/originless callers. It uses one paid synthetic text turn and one synthetic SDP bootstrap, with no tool execution, microphone, or media stream, and prints only safe status/UUID/commit metadata. It verifies bootstrap negotiation, not actual audio playback. It is excluded from unit tests and CI.

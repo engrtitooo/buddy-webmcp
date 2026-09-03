@@ -14,6 +14,7 @@ import {
   type WebMCPTool,
 } from '@buddy/shared';
 import { createOpenAIRequestBody, extractOpenAIOutputText, normalizeOpenAIModelDecision } from './openai';
+import { extensionOriginPolicy, isAllowedOrigin, isChromeExtensionOrigin, type ExtensionOriginPolicy } from './origins';
 import {
   MAX_REALTIME_SDP_BYTES,
   createOpenAIRealtimeCall,
@@ -67,6 +68,7 @@ export class EnvironmentAuthVerifier implements AuthVerifier {
 export interface BuddyServerOptions {
   allowedOrigins?: Set<string>;
   allowOriginless?: boolean;
+  extensionOriginPolicy?: ExtensionOriginPolicy;
   rateLimiter?: RateLimiter;
   authVerifier?: AuthVerifier;
   fetchImpl?: typeof fetch;
@@ -78,6 +80,7 @@ export interface BuddyServerOptions {
 }
 
 export function assertProductionEnvironment(environment: NodeJS.ProcessEnv = process.env): void {
+  extensionOriginPolicy(environment);
   if (environment.NODE_ENV !== 'production') return;
   const missing = ['OPENAI_API_KEY', 'ALLOWED_ORIGINS'].filter((name) => !environment[name]?.trim());
   if (missing.length) throw new Error(`Missing required production environment: ${missing.join(', ')}`);
@@ -86,8 +89,10 @@ export function assertProductionEnvironment(environment: NodeJS.ProcessEnv = pro
   for (const origin of origins) {
     let parsed: URL;
     try { parsed = new URL(origin); } catch { throw new Error(`Invalid production origin: ${origin}`); }
-    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') throw new Error('Production ALLOWED_ORIGINS must not include localhost.');
+    const hostname = parsed.hostname.replace(/\.$/, '');
+    if (hostname === 'localhost' || hostname.endsWith('.localhost') || /^127\./.test(hostname) || hostname === '[::1]' || /^\[::ffff:7f[0-9a-f]{2}:/.test(hostname)) throw new Error('Production ALLOWED_ORIGINS must not include localhost or loopback addresses.');
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'chrome-extension:') throw new Error('Production origins must use HTTPS or chrome-extension.');
+    if (parsed.protocol === 'chrome-extension:' ? !isChromeExtensionOrigin(origin) : parsed.origin !== origin || parsed.hostname.includes('*')) throw new Error('Invalid production origin: expected an exact HTTPS or Chrome extension origin.');
   }
 }
 
@@ -164,6 +169,7 @@ function deploymentInfo(): { contractVersion: number; commit: string; branch?: s
 
 export function createBuddyServer(options: BuddyServerOptions = {}): Server {
   const allowedOrigins = options.allowedOrigins ?? configuredOrigins();
+  const extensionPolicy = options.extensionOriginPolicy ?? extensionOriginPolicy();
   const allowOriginless = options.allowOriginless ?? process.env.ALLOW_ORIGINLESS === 'true';
   const limiter = options.rateLimiter ?? new MemoryRateLimiter(Math.max(1, Number(process.env.BUDDY_RATE_LIMIT_MAX || 30)), Math.max(1_000, Number(process.env.BUDDY_RATE_LIMIT_WINDOW_MS || 60_000)));
   const auth = options.authVerifier ?? new EnvironmentAuthVerifier();
@@ -176,11 +182,13 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
 
   return createServer(async (req, res) => {
     const started = Date.now(); const requestId = randomUUID(); const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const originAllowed = origin ? isAllowedOrigin(origin, allowedOrigins, extensionPolicy) : allowOriginless;
     const reply = (status: number, body: unknown, diagnostic?: { errorCode: AgentErrorCode; validationStage?: AgentValidationStage; toolName?: string }, responseHeaders: Record<string, string> = {}) => {
       const headers: Record<string, string> = { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-request-id': requestId, 'access-control-allow-headers': 'content-type,authorization,x-buddy-locale', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-expose-headers': 'x-request-id,x-buddy-realtime-model,x-buddy-realtime-voice,x-buddy-realtime-vad,x-buddy-realtime-max-session-seconds', vary: 'origin', ...responseHeaders };
-      if (origin && allowedOrigins.has(origin)) headers['access-control-allow-origin'] = origin;
+      if (origin && originAllowed) headers['access-control-allow-origin'] = origin;
       res.writeHead(status, headers); res.end(status === 204 ? undefined : typeof body === 'string' ? body : JSON.stringify(body));
-      console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path: req.url, status, ...(diagnostic ?? {}), durationMs: Date.now() - started }));
+      const path = ['/', '/health', '/agent/next', '/realtime/session'].includes(req.url ?? '') ? req.url : 'unknown';
+      console.info(JSON.stringify({ event: 'buddy_api_request', requestId, method: req.method, path, status, ...(diagnostic ?? {}), durationMs: Date.now() - started }));
     };
     const errorReply = (status: number, code: AgentErrorCode, message: string, validationStage?: AgentValidationStage, toolName?: string) => {
       const body: AgentApiErrorResponse = { requestId, error: { code, message, ...(validationStage ? { validationStage } : {}), ...(toolName ? { toolName } : {}) } };
@@ -188,13 +196,15 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
     };
     if (req.url === '/' && req.method === 'GET') { reply(200, { name: 'Buddy WebMCP API', status: 'ok', health: '/health' }); return; }
     if (req.url === '/health' && req.method === 'GET') { reply(200, { status: 'ok', ...deploymentInfo() }); return; }
-    if (!(origin ? allowedOrigins.has(origin) : allowOriginless)) { errorReply(403, 'ORIGIN_NOT_ALLOWED', 'Origin not allowed'); return; }
+    if (!originAllowed) { errorReply(403, 'ORIGIN_NOT_ALLOWED', 'Origin not allowed'); return; }
     if (req.method === 'OPTIONS') { reply(204, {}); return; }
     const agentRequest = req.url === '/agent/next' && req.method === 'POST';
     const realtimeRequest = req.url === '/realtime/session' && req.method === 'POST';
     if (!agentRequest && !realtimeRequest) { reply(404, { error: 'Not found', requestId }); return; }
     if (!await auth.verify(req)) { errorReply(401, 'UNAUTHORIZED', 'Unauthorized'); return; }
-    const clientKey = `${origin ?? 'originless'}:${req.socket.remoteAddress || 'unknown'}`;
+    // Share extension quotas across IDs so rotating an unpacked ID cannot reset a bucket.
+    // Do not trust caller-controlled X-Forwarded-For; a gateway can supply a durable limiter.
+    const clientKey = `${origin && isChromeExtensionOrigin(origin) ? 'chrome-extension' : origin ?? 'originless'}:${req.socket.remoteAddress || 'unknown'}`;
     if (!(realtimeRequest ? realtimeLimiter : limiter).allow(clientKey)) { errorReply(429, 'RATE_LIMITED', 'Too many requests'); return; }
     if (realtimeRequest) {
       if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/sdp')) { errorReply(415, 'INVALID_SDP', 'Content-Type must be application/sdp', 'request_body'); return; }

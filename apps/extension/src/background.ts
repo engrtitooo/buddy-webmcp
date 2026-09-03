@@ -7,12 +7,13 @@ import {
   type Locale,
   type RealtimeSessionRuntimeResponse,
 } from '@buddy/shared';
-import { normalizeAgentApiFailure } from './api-errors';
+import { normalizeAgentApiFailure, safeRequestId } from './api-errors';
 
 declare const __BUDDY_API_BASE_URL__: string;
 
 const API_BASE_URL = __BUDDY_API_BASE_URL__.replace(/\/$/, '');
-const REQUEST_TIMEOUT_MS = 20_000;
+// Allow the API's default 20-second provider deadline to return its safe diagnostic first.
+const REQUEST_TIMEOUT_MS = 30_000;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function validPayload(value: unknown): value is AgentNextInput {
@@ -38,16 +39,16 @@ async function requestNext(payload: AgentNextInput): Promise<AgentNextRuntimeRes
       cache: 'no-store',
       redirect: 'error',
     });
-    const requestId = response.headers.get('x-request-id') ?? fallbackRequestId;
+    const requestId = safeRequestId(response.headers.get('x-request-id'), fallbackRequestId);
     if (!response.ok) {
       let body: unknown;
-      try { body = await response.json(); } catch { body = undefined; }
+      try { body = await response.json(); } catch (error) { if (controller.signal.aborted) throw error; body = undefined; }
       return { ok: false, requestId, error: normalizeAgentApiFailure(response.status, body) };
     }
     return { ok: true, requestId, decision: await response.json() } as AgentNextRuntimeResponse;
-  } catch (error) {
-    const timedOut = error instanceof DOMException && error.name === 'AbortError';
-    return { ok: false, requestId: fallbackRequestId, error: { code: timedOut ? 'TIMEOUT' : 'UNAVAILABLE', message: timedOut ? 'The agent service took too long to respond.' : 'The agent service is unavailable.', retryable: true } };
+  } catch {
+    const timedOut = controller.signal.aborted;
+    return { ok: false, requestId: fallbackRequestId, error: { code: timedOut ? 'TIMEOUT' : 'NETWORK_ERROR', message: timedOut ? 'The agent service took too long to respond.' : 'The agent service is unavailable.', retryable: true } };
   } finally {
     clearTimeout(timeout);
   }
@@ -67,10 +68,10 @@ async function requestRealtimeSession(sdp: string, locale: Locale): Promise<Real
       cache: 'no-store',
       redirect: 'error',
     });
-    const requestId = response.headers.get('x-request-id') ?? fallbackRequestId;
+    const requestId = safeRequestId(response.headers.get('x-request-id'), fallbackRequestId);
     if (!response.ok) {
       let body: unknown;
-      try { body = await response.json(); } catch { body = undefined; }
+      try { body = await response.json(); } catch (error) { if (controller.signal.aborted) throw error; body = undefined; }
       return { ok: false, requestId, error: normalizeAgentApiFailure(response.status, body) };
     }
     const answer = await response.text();
@@ -86,9 +87,9 @@ async function requestRealtimeSession(sdp: string, locale: Locale): Promise<Real
       vadMode: 'semantic_vad',
       maxSessionSeconds: Math.max(60, Math.min(3_600, Number(response.headers.get('x-buddy-realtime-max-session-seconds')) || 900)),
     };
-  } catch (error) {
-    const timedOut = error instanceof DOMException && error.name === 'AbortError';
-    return { ok: false, requestId: fallbackRequestId, error: { code: timedOut ? 'TIMEOUT' : 'UNAVAILABLE', message: timedOut ? 'Voice Mode took too long to connect.' : 'Voice Mode is temporarily unavailable.', retryable: true } };
+  } catch {
+    const timedOut = controller.signal.aborted;
+    return { ok: false, requestId: fallbackRequestId, error: { code: timedOut ? 'TIMEOUT' : 'NETWORK_ERROR', message: timedOut ? 'Voice Mode took too long to connect.' : 'Voice Mode is temporarily unavailable.', retryable: true } };
   } finally {
     clearTimeout(timeout);
   }

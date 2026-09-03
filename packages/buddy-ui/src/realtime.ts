@@ -1,4 +1,4 @@
-import type { Locale } from '@buddy/shared';
+import { AgentServiceError, type Locale } from '@buddy/shared';
 
 export type RealtimeVoiceState =
   | 'IDLE'
@@ -44,6 +44,7 @@ export interface RealtimeDiagnostics {
   microphoneState: 'inactive' | 'active';
   vadMode?: 'semantic_vad';
   sessionRequestId?: string;
+  sessionHttpStatus?: number;
   reconnectAttempt: number;
   fallbackReason?: string;
   lastSafeErrorCode?: string;
@@ -95,6 +96,7 @@ const RECONNECT_DELAYS = [500, 1_500] as const;
 const IDLE_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUTS = { microphoneMs: 10_000, peerMs: 15_000, dataChannelMs: 15_000, noSpeechMs: 30_000, postSpeechResponseMs: 20_000 } as const;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const safeConnectionErrors = new Set(['WEBRTC_UNSUPPORTED', 'REALTIME_UNAVAILABLE', 'MICROPHONE_TIMEOUT', 'DATA_CHANNEL_CLOSED', 'PEER_CONNECTION_FAILED', 'SDP_OFFER_FAILED', 'PEER_CONNECTION_TIMEOUT', 'DATA_CHANNEL_TIMEOUT']);
 
 export function supportsOpenAIRealtime(): boolean {
   return typeof RTCPeerConnection !== 'undefined' && typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
@@ -169,10 +171,11 @@ export class RealtimeVoiceClient {
       this.startLevelMeter(this.stream);
       await this.connect(locale, false);
     } catch (error) {
-      const code = error instanceof DOMException && error.name === 'NotAllowedError' ? 'MICROPHONE_PERMISSION_DENIED' : error instanceof Error ? error.message : 'REALTIME_UNAVAILABLE';
+      const code = error instanceof AgentServiceError ? error.details.code : error instanceof DOMException && error.name === 'NotAllowedError' ? 'MICROPHONE_PERMISSION_DENIED' : error instanceof Error && safeConnectionErrors.has(error.message) ? error.message : 'REALTIME_UNAVAILABLE';
       const message = code === 'MICROPHONE_PERMISSION_DENIED' ? 'Buddy needs microphone access to start Voice Mode.' : 'Voice Mode is temporarily unavailable. You can keep using text.';
       this.options.onError?.(message, code);
       this.updateDiagnostics({ lastSafeErrorCode: code });
+      if (error instanceof AgentServiceError) this.updateDiagnostics({ sessionRequestId: error.requestId, ...(error.details.status ? { sessionHttpStatus: error.details.status } : {}) });
       this.setState('ERROR');
       this.cleanupAll();
       throw error;

@@ -84,7 +84,7 @@ describe('production environment', () => {
     expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'http://app.example' })).toThrow(/HTTPS or chrome-extension/i);
   });
   it('accepts an explicit production extension origin', () => {
-    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'chrome-extension://abcdefghijklmnop' })).not.toThrow();
+    expect(() => assertProductionEnvironment({ NODE_ENV: 'production', OPENAI_API_KEY: 'test', ALLOWED_ORIGINS: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' })).not.toThrow();
   });
 });
 

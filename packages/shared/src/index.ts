@@ -258,6 +258,8 @@ export type AgentErrorCode =
   | 'ORIGIN_NOT_ALLOWED'
   | 'RATE_LIMITED'
   | 'UNAVAILABLE'
+  | 'NETWORK_ERROR'
+  | 'HTTP_ERROR'
   | 'TIMEOUT'
   | 'PROVIDER_ERROR';
 
