@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_RULES, type WebMCPTool } from '@buddy/shared';
-import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, classifyRisk, normalizeAgentDecision, normalizeAgentDecisionOrRejection, normalizePlan, toolCallFingerprint, validateToolArguments } from './index';
+import { CapabilityMapper, MockAgentProvider, PermissionEngine, RepeatedToolCallGuard, classifyRisk, normalizeAgentDecision, normalizeAgentDecisionOrRejection, normalizePlan, toolCallFingerprint, validateToolArguments, validateToolSchema } from './index';
 const tool = (name: string, description = name, readOnlyHint = false): WebMCPTool => ({ name, description, origin: 'https://example.com', annotations: { readOnlyHint } });
 
 describe('CapabilityMapper', () => {
@@ -92,7 +92,29 @@ describe('tool argument validation', () => {
     expect(() => validateToolArguments(schemaTool, { query: 'gift', hidden: true })).toThrow(/schema/);
   });
   it('stops safely on an invalid site schema', () => {
-    expect(() => validateToolArguments({ ...schemaTool, inputSchema: { type: 'not-a-type' } }, {})).toThrow(/invalid schema/);
+    expect(() => validateToolArguments({ ...schemaTool, inputSchema: { type: 'not-a-type' } }, {})).toThrow(/incompatible schema/);
+  });
+  it('validates exact flat and nested advertised shapes without adding wrappers', () => {
+    expect(() => validateToolArguments(schemaTool, { query: 'skincare' })).not.toThrow();
+    expect(() => validateToolArguments(schemaTool, { catalog: { query: 'skincare' } })).toThrow(/not an advertised property/);
+    const nested: WebMCPTool = { ...schemaTool, inputSchema: { type: 'object', additionalProperties: false, properties: { catalog: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' } }, required: ['query'] } }, required: ['catalog'] } };
+    expect(() => validateToolArguments(nested, { catalog: { query: 'skincare' } })).not.toThrow();
+    expect(() => validateToolArguments(nested, { query: 'skincare' })).toThrow(/catalog is required/);
+  });
+  it('supports a Rare Beauty-style schema without runtime code generation', () => {
+    const rareBeauty: WebMCPTool = { ...schemaTool, inputSchema: {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object', additionalProperties: false,
+      $defs: { filter: { type: 'object', properties: { category: { type: ['string', 'null'], nullable: true }, maxPrice: { type: 'number', minimum: 0 } }, additionalProperties: false } },
+      properties: { query: { type: 'string', minLength: 1, maxLength: 120 }, filters: { anyOf: [{ $ref: '#/$defs/filter' }, { type: 'null' }] } },
+      required: ['query'],
+    } };
+    expect(() => validateToolSchema(rareBeauty)).not.toThrow();
+    expect(() => validateToolArguments(rareBeauty, { query: 'lip oil', filters: { category: 'lips', maxPrice: 30 } })).not.toThrow();
+  });
+  it('rejects remote references and unsupported validation keywords safely', () => {
+    expect(() => validateToolSchema({ ...schemaTool, inputSchema: { $ref: 'https://example.com/schema.json' } })).toThrow(/incompatible/);
+    expect(() => validateToolSchema({ ...schemaTool, inputSchema: { type: 'object', patternProperties: { '.*': { type: 'string' } } } })).toThrow(/incompatible/);
   });
 });
 
@@ -131,5 +153,11 @@ describe('RepeatedToolCallGuard', () => {
     const guard = new RepeatedToolCallGuard(); guard.assertNew({ toolName: 'search', args: { q: 'a' } });
     expect(() => guard.assertNew({ toolName: 'search', args: { q: 'b' } })).not.toThrow();
     expect(toolCallFingerprint({ toolName: 'compare', args: {} })).not.toBe(toolCallFingerprint({ toolName: 'search', args: {} }));
+  });
+  it('normalizes case and whitespace and detects repeated semantic results', () => {
+    const guard = new RepeatedToolCallGuard(); guard.assertNew({ toolName: 'search', args: { query: ' SkinCare   Products ' } });
+    expect(() => guard.assertNew({ toolName: 'search', args: { query: 'skincare products' } })).toThrow(/repeated/);
+    expect(guard.recordSuccess({ toolName: 'search', args: { query: 'first' } }, { items: [{ id: 1, name: 'Serum' }] })).toBe(false);
+    expect(guard.recordSuccess({ toolName: 'search', args: { query: 'second' } }, { items: [{ name: 'serum', id: 1 }] })).toBe(true);
   });
 });

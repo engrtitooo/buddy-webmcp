@@ -1,4 +1,5 @@
 import { normalizeWebMCPTool, type WebMCPTool } from '@buddy/shared';
+import { validateToolSchema } from '@buddy/agent-core';
 
 export interface BrowserWebMCPAnnotations { readOnlyHint?: boolean; untrustedContentHint?: boolean }
 export interface BrowserRegisteredTool { name: string; title?: string; description: string; inputSchema?: Record<string, unknown> | string; window: Window; origin: string; annotations?: BrowserWebMCPAnnotations }
@@ -23,7 +24,7 @@ export function normalizeRegisteredTool(tool: BrowserRegisteredTool, fallbackOri
     try { inputSchema = JSON.parse(inputSchema) as unknown; } catch { return undefined; }
   }
   try {
-    return normalizeWebMCPTool({
+    const normalized = normalizeWebMCPTool({
       name: tool.name,
       title: tool.title,
       description: tool.description,
@@ -31,6 +32,8 @@ export function normalizeRegisteredTool(tool: BrowserRegisteredTool, fallbackOri
       origin: tool.origin || fallbackOrigin,
       annotations: tool.annotations,
     });
+    validateToolSchema(normalized);
+    return normalized;
   } catch { return undefined; }
 }
 
@@ -39,6 +42,7 @@ export class WebMCPAdapter {
   private revision = 0;
   private signature = '';
   private context: BrowserModelContext | undefined;
+  private unavailableSignature = '';
 
   isSupported(): boolean {
     return Boolean(document.modelContext?.getTools && document.modelContext?.executeTool);
@@ -55,11 +59,18 @@ export class WebMCPAdapter {
     }
     if (!context) return [];
     const normalized: Array<{ registered: BrowserRegisteredTool; exposed: WebMCPTool }> = [];
+    const unavailable: string[] = [];
     const names = new Set<string>();
     for (const registered of (await context.getTools()).slice(0, 64)) {
       const exposed = normalizeRegisteredTool(registered, location.origin);
-      if (!exposed || names.has(exposed.name)) continue;
+      if (!exposed) { if (/^[A-Za-z0-9_.-]{1,128}$/.test(registered.name)) unavailable.push(registered.name); continue; }
+      if (names.has(exposed.name)) continue;
       names.add(exposed.name); normalized.push({ registered, exposed });
+    }
+    const unavailableSignature = unavailable.sort().join(',');
+    if (unavailableSignature !== this.unavailableSignature) {
+      this.unavailableSignature = unavailableSignature;
+      unavailable.forEach((toolName) => console.warn('[Buddy] WebMCP tool unavailable', { toolName, reason: 'incompatible-definition-or-schema' }));
     }
     const exposed = normalized.map((item) => item.exposed);
     const nextSignature = JSON.stringify(exposed);

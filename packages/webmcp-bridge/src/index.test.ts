@@ -80,6 +80,15 @@ describe('WebMCPAdapter', () => {
       await expect(new WebMCPAdapter().getTools()).resolves.toEqual([]);
     }
   });
+  it('disables only the tool with an unsupported schema', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    tools = [
+      { name: 'search', description: 'Search', origin: 'https://example.com', window, inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+      { name: 'unsafe_ref', description: 'Unsafe ref', origin: 'https://example.com', window, inputSchema: { $ref: 'https://example.com/remote.json' } },
+    ];
+    await expect(new WebMCPAdapter().getTools()).resolves.toEqual([expect.objectContaining({ name: 'search' })]);
+    expect(warning).toHaveBeenCalledWith('[Buddy] WebMCP tool unavailable', { toolName: 'unsafe_ref', reason: 'incompatible-definition-or-schema' });
+  });
   it('discovers WebMCP when the API appears after initial page load', async () => {
     vi.useFakeTimers(); Object.defineProperty(document, 'modelContext', { configurable: true, value: undefined });
     const adapter = new WebMCPAdapter(); const callback = vi.fn(); cleanups.push(adapter.subscribe(callback));

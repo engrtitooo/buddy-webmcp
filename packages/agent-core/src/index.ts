@@ -1,4 +1,3 @@
-import Ajv from 'ajv';
 import {
   AGENT_LIMITS,
   type AgentDecision,
@@ -98,17 +97,191 @@ function containsSensitiveArgument(value: unknown): boolean {
 
 const MAX_PLAN_STEPS = 12;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: false });
+const MAX_SCHEMA_DEPTH = 32;
+const MAX_SCHEMA_NODES = 2_048;
+const MAX_PATTERN_LENGTH = 256;
+const schemaKeywords = new Set([
+  '$id', '$schema', '$comment', '$defs', 'definitions', '$ref',
+  'title', 'description', 'default', 'examples', 'deprecated', 'readOnly', 'writeOnly',
+  'type', 'nullable', 'properties', 'required', 'additionalProperties',
+  'items', 'minItems', 'maxItems', 'uniqueItems', 'minProperties', 'maxProperties',
+  'enum', 'const', 'anyOf', 'oneOf', 'allOf',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+  'minLength', 'maxLength', 'pattern', 'format',
+]);
+const jsonTypes = new Set(['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']);
+const safeFormats = new Set(['date', 'date-time', 'time', 'email', 'hostname', 'ipv4', 'ipv6', 'uri', 'url', 'uuid']);
+
+export class ToolSchemaCompatibilityError extends Error {
+  override readonly name = 'ToolSchemaCompatibilityError';
+}
+
+export class ToolArgumentValidationError extends Error {
+  override readonly name = 'ToolArgumentValidationError';
+  constructor(readonly toolName: string, readonly validationErrors: string[]) {
+    super(`The ${toolName} action arguments do not match the site's schema: ${validationErrors.slice(0, 4).join('; ')}`);
+  }
+}
 
 function boundedJsonLength(value: unknown, limit: number): boolean {
   try { return JSON.stringify(value).length <= limit; } catch { return false; }
 }
 
+function schemaError(toolName: string): never {
+  throw new ToolSchemaCompatibilityError(`The ${toolName} action has an incompatible schema, so Buddy made only that action unavailable.`);
+}
+
+function resolveLocalRef(root: Record<string, unknown>, ref: string): unknown {
+  if (ref === '#') return root;
+  if (!ref.startsWith('#/')) return undefined;
+  let current: unknown = root;
+  for (const token of ref.slice(2).split('/').map((part) => part.replaceAll('~1', '/').replaceAll('~0', '~'))) {
+    if (!isRecord(current) || !Object.hasOwn(current, token)) return undefined;
+    current = current[token];
+  }
+  return current;
+}
+
+function validateSchemaShape(schema: unknown, root: Record<string, unknown>, toolName: string, depth: number, state: { nodes: number }): void {
+  if (typeof schema === 'boolean') return;
+  if (!isRecord(schema) || depth > MAX_SCHEMA_DEPTH || ++state.nodes > MAX_SCHEMA_NODES) schemaError(toolName);
+  if (Object.keys(schema).some((key) => !schemaKeywords.has(key))) schemaError(toolName);
+  if (schema.$ref !== undefined && (typeof schema.$ref !== 'string' || resolveLocalRef(root, schema.$ref) === undefined)) schemaError(toolName);
+  if (schema.type !== undefined) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.length || types.some((type) => typeof type !== 'string' || !jsonTypes.has(type))) schemaError(toolName);
+  }
+  if (schema.nullable !== undefined && typeof schema.nullable !== 'boolean') schemaError(toolName);
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== 'string'))) schemaError(toolName);
+  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.length)) schemaError(toolName);
+  if (schema.uniqueItems !== undefined && typeof schema.uniqueItems !== 'boolean') schemaError(toolName);
+  for (const keyword of ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties'] as const) {
+    const countKeyword = keyword.startsWith('min') || keyword.startsWith('max') ? !['minimum', 'maximum'].includes(keyword) : false;
+    if (schema[keyword] !== undefined && (typeof schema[keyword] !== 'number' || !Number.isFinite(schema[keyword]) || (keyword === 'multipleOf' && schema[keyword] <= 0) || (countKeyword && (!Number.isInteger(schema[keyword]) || schema[keyword] < 0)))) schemaError(toolName);
+  }
+  if (schema.pattern !== undefined) {
+    if (typeof schema.pattern !== 'string' || schema.pattern.length > MAX_PATTERN_LENGTH || /\\[1-9]|\(\?[<!=]|(?:\*|\+|\{\d+,?\d*\})(?:\s*\)|\s*)[+*{]|\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)[+*{]/.test(schema.pattern)) schemaError(toolName);
+    try { new RegExp(schema.pattern, 'u'); } catch { schemaError(toolName); }
+  }
+  if (schema.format !== undefined && (typeof schema.format !== 'string' || !safeFormats.has(schema.format))) schemaError(toolName);
+  for (const collection of ['$defs', 'definitions', 'properties'] as const) {
+    if (schema[collection] === undefined) continue;
+    if (!isRecord(schema[collection])) schemaError(toolName);
+    for (const nested of Object.values(schema[collection])) validateSchemaShape(nested, root, toolName, depth + 1, state);
+  }
+  if (schema.additionalProperties !== undefined) validateSchemaShape(schema.additionalProperties, root, toolName, depth + 1, state);
+  if (schema.items !== undefined) {
+    if (Array.isArray(schema.items)) schema.items.forEach((nested) => validateSchemaShape(nested, root, toolName, depth + 1, state));
+    else validateSchemaShape(schema.items, root, toolName, depth + 1, state);
+  }
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    if (schema[keyword] === undefined) continue;
+    if (!Array.isArray(schema[keyword]) || !schema[keyword].length) schemaError(toolName);
+    schema[keyword].forEach((nested) => validateSchemaShape(nested, root, toolName, depth + 1, state));
+  }
+}
+
+function exactJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(exactJsonValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, exactJsonValue(value[key])]));
+}
+
+function equalJson(left: unknown, right: unknown): boolean {
+  try { return JSON.stringify(exactJsonValue(left)) === JSON.stringify(exactJsonValue(right)); } catch { return false; }
+}
+
+function valueHasType(value: unknown, type: string): boolean {
+  if (type === 'null') return value === null;
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'object') return isRecord(value);
+  if (type === 'integer') return typeof value === 'number' && Number.isInteger(value);
+  if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
+  return typeof value === type;
+}
+
+function validFormat(value: string, format: string): boolean {
+  if (format === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (format === 'hostname') return value.length <= 253 && /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(value);
+  if (format === 'ipv4') return value.split('.').length === 4 && value.split('.').every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+  if (format === 'uuid') return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  if (format === 'date') return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  if (format === 'time') return /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-][0-2]\d:[0-5]\d)$/.test(value);
+  if (format === 'date-time') return /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+  if (format === 'uri' || format === 'url') { try { const url = new URL(value); return format === 'uri' || ['http:', 'https:'].includes(url.protocol); } catch { return false; } }
+  if (format === 'ipv6') return /^[0-9a-f:]+$/i.test(value) && value.includes(':');
+  return true;
+}
+
+function collectValidationErrors(schema: unknown, value: unknown, root: Record<string, unknown>, path: string, depth: number, refs: number): string[] {
+  if (depth > MAX_SCHEMA_DEPTH || refs > MAX_SCHEMA_DEPTH) return [`${path} exceeds the supported nesting depth`];
+  if (schema === true) return [];
+  if (schema === false) return [`${path} is not allowed`];
+  if (!isRecord(schema)) return [`${path} uses an incompatible schema`];
+  const errors: string[] = [];
+  if (typeof schema.$ref === 'string') {
+    const target = resolveLocalRef(root, schema.$ref);
+    errors.push(...collectValidationErrors(target, value, root, path, depth + 1, refs + 1));
+  }
+  const nullable = schema.nullable === true;
+  const declaredTypes = schema.type === undefined ? [] : (Array.isArray(schema.type) ? schema.type : [schema.type]) as string[];
+  if (value === null && nullable) return errors;
+  if (declaredTypes.length && !declaredTypes.some((type) => valueHasType(value, type))) errors.push(`${path} must be ${declaredTypes.join(' or ')}`);
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => equalJson(candidate, value))) errors.push(`${path} must be one of the advertised values`);
+  if (Object.hasOwn(schema, 'const') && !equalJson(schema.const, value)) errors.push(`${path} must equal the advertised constant`);
+  for (const keyword of ['allOf', 'anyOf', 'oneOf'] as const) {
+    if (!Array.isArray(schema[keyword])) continue;
+    const branches = schema[keyword].map((branch) => collectValidationErrors(branch, value, root, path, depth + 1, refs));
+    if (keyword === 'allOf') branches.forEach((branch) => errors.push(...branch));
+    else {
+      const passing = branches.filter((branch) => branch.length === 0).length;
+      if ((keyword === 'anyOf' && passing === 0) || (keyword === 'oneOf' && passing !== 1)) errors.push(`${path} must match ${keyword === 'oneOf' ? 'exactly one' : 'at least one'} advertised shape`);
+    }
+  }
+  if (typeof value === 'string') {
+    if (typeof schema.minLength === 'number' && [...value].length < schema.minLength) errors.push(`${path} is shorter than ${schema.minLength}`);
+    if (typeof schema.maxLength === 'number' && [...value].length > schema.maxLength) errors.push(`${path} is longer than ${schema.maxLength}`);
+    if (typeof schema.pattern === 'string' && (value.length > 2_048 || !new RegExp(schema.pattern, 'u').test(value))) errors.push(`${path} does not match the required pattern`);
+    if (typeof schema.format === 'string' && !validFormat(value, schema.format)) errors.push(`${path} must be a valid ${schema.format}`);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (typeof schema.minimum === 'number' && value < schema.minimum) errors.push(`${path} must be at least ${schema.minimum}`);
+    if (typeof schema.maximum === 'number' && value > schema.maximum) errors.push(`${path} must be at most ${schema.maximum}`);
+    if (typeof schema.exclusiveMinimum === 'number' && value <= schema.exclusiveMinimum) errors.push(`${path} must be greater than ${schema.exclusiveMinimum}`);
+    if (typeof schema.exclusiveMaximum === 'number' && value >= schema.exclusiveMaximum) errors.push(`${path} must be less than ${schema.exclusiveMaximum}`);
+    if (typeof schema.multipleOf === 'number' && Math.abs(value / schema.multipleOf - Math.round(value / schema.multipleOf)) > 1e-10) errors.push(`${path} must be a multiple of ${schema.multipleOf}`);
+  }
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) errors.push(`${path} needs at least ${schema.minItems} items`);
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) errors.push(`${path} allows at most ${schema.maxItems} items`);
+    if (schema.uniqueItems === true && new Set(value.map((item) => JSON.stringify(exactJsonValue(item)))).size !== value.length) errors.push(`${path} items must be unique`);
+    const itemSchema = schema.items;
+    if (Array.isArray(itemSchema)) value.forEach((item, index) => { if (itemSchema[index] !== undefined) errors.push(...collectValidationErrors(itemSchema[index], item, root, `${path}/${index}`, depth + 1, refs)); });
+    else if (itemSchema !== undefined) value.forEach((item, index) => errors.push(...collectValidationErrors(itemSchema, item, root, `${path}/${index}`, depth + 1, refs)));
+  }
+  if (isRecord(value)) {
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    if (Array.isArray(schema.required)) for (const key of schema.required) if (typeof key === 'string' && !Object.hasOwn(value, key)) errors.push(`${path}/${key} is required`);
+    if (typeof schema.minProperties === 'number' && Object.keys(value).length < schema.minProperties) errors.push(`${path} needs at least ${schema.minProperties} properties`);
+    if (typeof schema.maxProperties === 'number' && Object.keys(value).length > schema.maxProperties) errors.push(`${path} allows at most ${schema.maxProperties} properties`);
+    for (const [key, nested] of Object.entries(value)) {
+      const childPath = `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`;
+      if (Object.hasOwn(properties, key)) errors.push(...collectValidationErrors(properties[key], nested, root, childPath, depth + 1, refs));
+      else if (schema.additionalProperties === false) errors.push(`${childPath} is not an advertised property`);
+      else if (isRecord(schema.additionalProperties) || typeof schema.additionalProperties === 'boolean') errors.push(...collectValidationErrors(schema.additionalProperties, nested, root, childPath, depth + 1, refs));
+    }
+  }
+  return errors.slice(0, 12);
+}
+
 export function validateToolSchema(tool: Pick<WebMCPTool, 'name' | 'inputSchema'>): void {
   if (!tool.inputSchema) return;
   if (!boundedJsonLength(tool.inputSchema, AGENT_LIMITS.maxSchemaBytes)) throw new Error(`The ${tool.name} action schema is too large to validate safely.`);
-  try { ajv.compile(tool.inputSchema); }
-  catch { throw new Error(`The ${tool.name} action has an invalid schema, so Buddy stopped safely.`); }
+  try { validateSchemaShape(tool.inputSchema, tool.inputSchema, tool.name, 0, { nodes: 0 }); }
+  catch (error) {
+    if (error instanceof ToolSchemaCompatibilityError) throw error;
+    throw new ToolSchemaCompatibilityError(`The ${tool.name} action has an incompatible schema, so Buddy made only that action unavailable.`);
+  }
 }
 
 export function validateToolArguments(tool: WebMCPTool, args: unknown): asserts args is Record<string, unknown> {
@@ -116,16 +289,8 @@ export function validateToolArguments(tool: WebMCPTool, args: unknown): asserts 
   if (!boundedJsonLength(args, AGENT_LIMITS.maxPayloadBytes)) throw new Error(`The ${tool.name} action arguments are too large.`);
   if (!tool.inputSchema) return;
   validateToolSchema(tool);
-  try {
-    const validate = ajv.compile(tool.inputSchema);
-    if (!validate(args)) {
-      const detail = (validate.errors ?? []).slice(0, 3).map((error) => `${error.instancePath || '/'} ${error.message ?? 'is invalid'}`).join('; ');
-      throw new Error(`The ${tool.name} action arguments do not match the site's schema${detail ? `: ${detail}` : '.'}`);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith(`The ${tool.name} action arguments`)) throw error;
-    throw new Error(`The ${tool.name} action has an invalid schema, so Buddy stopped safely.`);
-  }
+  const errors = collectValidationErrors(tool.inputSchema, args, tool.inputSchema, '', 0, 0);
+  if (errors.length) throw new ToolArgumentValidationError(tool.name, errors);
 }
 
 export function normalizeAgentDecision(value: unknown, tools: WebMCPTool[]): AgentDecision {
@@ -177,6 +342,7 @@ export function normalizeAgentDecisionOrRejection(value: unknown, tools: WebMCPT
 }
 
 function stableValue(value: unknown): unknown {
+  if (typeof value === 'string') return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
   if (Array.isArray(value)) return value.map(stableValue);
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
@@ -188,10 +354,18 @@ export function toolCallFingerprint(call: Pick<Extract<AgentDecision, { kind: 't
 
 export class RepeatedToolCallGuard {
   private readonly fingerprints = new Set<string>();
+  private readonly successfulResults = new Map<string, Set<string>>();
   assertNew(call: Pick<Extract<AgentDecision, { kind: 'tool_call' }>, 'toolName' | 'args'>): void {
     const fingerprint = toolCallFingerprint(call);
     if (this.fingerprints.has(fingerprint)) throw new Error('Buddy stopped because the agent repeated the same action.');
     this.fingerprints.add(fingerprint);
+  }
+  recordSuccess(call: Pick<Extract<AgentDecision, { kind: 'tool_call' }>, 'toolName' | 'args'>, result: unknown): boolean {
+    const fingerprint = JSON.stringify(stableValue(result));
+    const prior = this.successfulResults.get(call.toolName) ?? new Set<string>();
+    const repeated = prior.has(fingerprint);
+    prior.add(fingerprint); this.successfulResults.set(call.toolName, prior);
+    return repeated;
   }
 }
 

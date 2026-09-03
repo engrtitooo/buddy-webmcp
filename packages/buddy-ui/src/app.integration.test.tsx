@@ -158,6 +158,25 @@ describe('BuddyApp integration', () => {
     expect(adapter.execute).toHaveBeenCalledTimes(1); expect(container.textContent).toContain('Done.');
   });
 
+  it('allows only one invalid-argument repair attempt', async () => {
+    const provider = new QueueProvider([
+      { kind: 'tool_call', toolName: 'search_items', args: {}, label: 'Search', reason: 'Find items', risk: 'READ' },
+      { kind: 'tool_call', toolName: 'search_items', args: { catalog: { query: 'gift' } }, label: 'Search', reason: 'Repair', risk: 'READ' },
+      { kind: 'tool_call', toolName: 'search_items', args: { query: 'gift' }, label: 'Search', reason: 'Late repair', risk: 'READ' },
+    ]);
+    const adapter = new FakeAdapter([searchTool]); const container = await renderBuddy(adapter, provider); await submitGoal(container);
+    expect(provider.inputs).toHaveLength(2); expect(adapter.execute).not.toHaveBeenCalled(); expect(container.textContent).toContain("couldn't safely prepare valid action details");
+  });
+
+  it('stops a semantically repeated read before reaching the hard turn ceiling', async () => {
+    const provider = new QueueProvider([
+      { kind: 'tool_call', toolName: 'search_items', args: { query: ' SkinCare   Products ' }, label: 'Search', reason: 'Find items', risk: 'READ' },
+      { kind: 'tool_call', toolName: 'search_items', args: { query: 'skincare products' }, label: 'Search again', reason: 'Repeat', risk: 'READ' },
+    ]);
+    const adapter = new FakeAdapter([searchTool]); const container = await renderBuddy(adapter, provider); await submitGoal(container);
+    expect(provider.inputs).toHaveLength(2); expect(adapter.execute).toHaveBeenCalledTimes(1); expect(container.textContent).toContain('already tried that site action');
+  });
+
   it('stops before execution when the tool revision changes during reasoning', async () => {
     let resolveDecision: ((value: unknown) => void) | undefined;
     const provider: AgentProvider = { next: vi.fn(async () => new Promise((resolve) => { resolveDecision = resolve; })), summarizeCapabilities: vi.fn(async () => ''), interpretToolResult: vi.fn(async () => '') };

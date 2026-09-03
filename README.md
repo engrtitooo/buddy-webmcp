@@ -40,7 +40,7 @@ For local development, use Chrome 149+ and enable `chrome://flags/#enable-webmcp
 User goal
   → extension service worker → POST /agent/next
   → one validated next action using current WebMCP tools only
-  → Ajv JSON Schema validation
+  → bounded MV3-safe JSON Schema interpretation (no runtime code generation)
   → PermissionEngine (recomputed risk + local rules)
   → ALLOW / ASK / BLOCK
   → execute at most one WebMCP tool
@@ -104,7 +104,7 @@ Its static content script runs on HTTP(S) pages but renders nothing until tools 
 
 `MockAgentProvider` is deterministic and reserved for tests or explicitly wired demos. The production extension never silently falls back to it.
 
-The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The browser adapter first converts native `RegisteredTool` handles into a strict JSON-only contract: `window`, functions, prototypes, cycles, unknown properties, and browser objects never cross the boundary. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model may return a conversational `final` or `needs_input` response without calling a tool. It never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it with Ajv against the current WebMCP schema, recomputes risk, and generates the call ID locally. Invalid proposals become bounded rejected observations so the next turn can repair them; they are never executed. Put `OPENAI_API_KEY` only in the server environment; never in a `VITE_*` variable or extension bundle.
+The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The browser adapter first converts native `RegisteredTool` handles into a strict JSON-only contract: `window`, functions, prototypes, cycles, unknown properties, and browser objects never cross the boundary. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model may return a conversational `final` or `needs_input` response without calling a tool. It never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it against the exact current WebMCP schema with a bounded interpreter that does not use `eval`/`new Function`, recomputes risk, and generates the call ID locally. Invalid proposals receive one bounded repair opportunity and are never executed. An incompatible site schema disables only its own tool.
 
 ```bash
 cp .env.example .env
@@ -124,7 +124,7 @@ Tools are mapped locally to `READ`, `LOW_RISK_WRITE`, `EXTERNAL_COMMUNICATION`, 
 
 The default rules ask before submissions, messages, purchases/reservations, and sensitive sharing, and block deletion. Financial and destructive actions never run silently.
 
-Agent runs are bound to the current WebMCP tool-set revision. If a site adds, removes, or replaces a tool while reasoning or while approval is pending, Buddy cancels the run. The loop is capped at ten decisions and rejects an identical repeated tool call.
+Agent runs are bound to the current WebMCP tool-set revision. If a site adds, removes, or replaces a tool while reasoning or while approval is pending, Buddy cancels the run. The loop keeps ten decisions as a hard ceiling, allows only one schema-repair turn per tool, normalizes semantically equivalent calls, and stops early when the same read tool returns the same result again.
 
 WebMCP discovery uses adaptive fallback polling at 2, 5, 10, then 30 seconds while the API is absent. Once detected, `toolchange` remains immediate and a conservative 30-second compatibility refresh detects replaced or disappearing experimental implementations.
 
@@ -134,9 +134,9 @@ The primary Voice Mode is OpenAI Realtime speech-to-speech over WebRTC. Pressing
 
 The Railway API owns the Realtime model, `marin` voice, language and trust instructions, VAD, session cap, and the only internal voice function. A voice action request re-enters the same `/agent/next` safety loop used by text. Unknown, malformed, stale, blocked, or unapproved WebMCP actions cannot execute. `SpeechRecognition`/`webkitSpeechRecognition` and `speechSynthesis` are retained only as a visible browser fallback when WebRTC or Realtime is unavailable.
 
-Voice Mode stops its microphone tracks, peer connection, data channel, remote audio, analyser, listeners, and timers when ended, after two minutes without speech, if the microphone disappears, on page exit, or when Buddy closes. Developer Mode reports bounded connection diagnostics and fallback reason without SDP, raw audio, credentials, or sensitive content.
+Voice Mode exposes separate connecting, microphone, peer, data-channel, speech, transcript, model-processing, playback, and idle phases. It stops its microphone tracks, peer connection, data channel, remote audio, analyser, listeners, and timers when ended, after the no-speech or post-speech-response timeout, if the microphone disappears, on page exit, or when Buddy closes. Developer Mode reports bounded connection diagnostics and playback failures without SDP, raw audio, credentials, or sensitive content.
 
-Realtime input, output, and transcription consume paid OpenAI usage while Voice Mode is connected, even when no WebMCP action runs. Text-only use does not open a Realtime session. The explicit start, two-minute speech-idle timeout, 15-minute default cap, two reconnect attempts, and server bootstrap limiter bound accidental use; production should also use provider spend alerts and limits.
+Realtime input, output, and transcription consume paid OpenAI usage while Voice Mode is connected, even when no WebMCP action runs. Text-only use does not open a Realtime session. The explicit start, 30-second initial no-speech timeout, 20-second post-speech response timeout, two-minute general idle timeout, 15-minute default cap, two reconnect attempts, and server bootstrap limiter bound accidental use; production should also use provider spend alerts and limits.
 
 Browser language is detected automatically. English, Arabic, and Spanish are implemented; Arabic switches the panel and conversation direction to RTL. Users can override language in Settings.
 

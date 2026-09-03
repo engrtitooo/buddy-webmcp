@@ -43,13 +43,14 @@ class FakePeer {
 
 const answer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n';
 
-function harness(overrides: { getUserMedia?: ReturnType<typeof vi.fn>; onToolRequest?: ReturnType<typeof vi.fn>; maxSessionSeconds?: number } = {}) {
+function harness(overrides: { getUserMedia?: ReturnType<typeof vi.fn>; onToolRequest?: ReturnType<typeof vi.fn>; maxSessionSeconds?: number; timeouts?: { microphoneMs?: number; peerMs?: number; dataChannelMs?: number; noSpeechMs?: number; postSpeechResponseMs?: number }; audioPlay?: ReturnType<typeof vi.fn> } = {}) {
   const stream = new FakeStream();
   const getUserMedia = overrides.getUserMedia ?? vi.fn(async () => stream as unknown as MediaStream);
   const peers: FakePeer[] = [];
   const provider: RealtimeSessionProvider = { supported: true, createSession: vi.fn(async () => ({ requestId: 'req-safe', sdp: answer, model: 'gpt-realtime-2.1', voice: 'marin', vadMode: 'semantic_vad' as const, maxSessionSeconds: overrides.maxSessionSeconds ?? 900 })) };
   const states: RealtimeVoiceState[] = []; const transcripts: VoiceTranscriptUpdate[] = [];
-  const audio = { autoplay: false, srcObject: null, setAttribute: vi.fn(), play: vi.fn(async () => undefined), pause: vi.fn(), remove: vi.fn() } as unknown as HTMLAudioElement;
+  const audio = { autoplay: false, srcObject: null, setAttribute: vi.fn(), play: overrides.audioPlay ?? vi.fn(async () => undefined), pause: vi.fn(), remove: vi.fn() } as unknown as HTMLAudioElement;
+  const errors: Array<{ message: string; code: string }> = [];
   const onToolRequest = overrides.onToolRequest ?? vi.fn(async () => ({ status: 'completed' as const, message: 'Safe result' }));
   const client = new RealtimeVoiceClient({
     provider,
@@ -60,8 +61,17 @@ function harness(overrides: { getUserMedia?: ReturnType<typeof vi.fn>; onToolReq
     onTranscript: (update) => transcripts.push(update),
     onToolRequest,
     onDiagnostics: vi.fn(),
+    onError: (message, code) => errors.push({ message, code }),
+    ...(overrides.timeouts ? { timeouts: overrides.timeouts } : {}),
   });
-  return { client, stream, getUserMedia, peers, provider, states, transcripts, audio, onToolRequest };
+  return { client, stream, getUserMedia, peers, provider, states, transcripts, audio, onToolRequest, errors };
+}
+
+async function startAndOpen(subject: ReturnType<typeof harness>, locale: 'en' | 'ar' | 'es' = 'en') {
+  const pending = subject.client.start(locale);
+  await vi.waitFor(() => expect(subject.peers.length).toBeGreaterThan(0));
+  subject.peers.at(-1)?.channel.open();
+  await pending;
 }
 
 beforeEach(() => {
@@ -75,15 +85,15 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('RealtimeVoiceClient', () => {
   it('requests the microphone only after explicit start and uses production audio constraints', async () => {
     const subject = harness(); expect(subject.getUserMedia).not.toHaveBeenCalled();
-    await subject.client.start('en');
+    await startAndOpen(subject);
     expect(subject.getUserMedia).toHaveBeenCalledWith({ audio: microphoneConstraints(), video: false });
     expect(subject.provider.createSession).toHaveBeenCalledWith(expect.stringContaining('m=audio'), 'en');
-    expect(subject.states[0]).toBe('CONNECTING');
+    expect(subject.states[0]).toBe('VOICE_CONNECTING'); expect(subject.states).toEqual(expect.arrayContaining(['MIC_ACQUIRED', 'PEER_CONNECTING', 'PEER_CONNECTED', 'DATA_CHANNEL_OPEN', 'LISTENING']));
   });
 
   it('deduplicates concurrent starts into one microphone and one Realtime session', async () => {
     const subject = harness();
-    await Promise.all([subject.client.start('en'), subject.client.start('en')]);
+    const starts = Promise.all([subject.client.start('en'), subject.client.start('en')]); await vi.waitFor(() => expect(subject.peers).toHaveLength(1)); subject.peers[0]?.channel.open(); await starts;
     expect(subject.getUserMedia).toHaveBeenCalledOnce(); expect(subject.provider.createSession).toHaveBeenCalledOnce(); expect(subject.peers).toHaveLength(1);
     subject.client.stop();
   });
@@ -94,18 +104,18 @@ describe('RealtimeVoiceClient', () => {
   });
 
   it('maps VAD, transcript, speaking, and interruption events without executing page APIs', async () => {
-    const subject = harness(); await subject.client.start('ar'); const channel = subject.peers[0]?.channel; expect(channel).toBeTruthy(); channel?.open();
+    const subject = harness(); await startAndOpen(subject, 'ar'); const channel = subject.peers[0]?.channel; expect(channel).toBeTruthy();
     channel?.message({ type: 'response.created', response: { id: 'resp-1' } }); channel?.message({ type: 'output_audio_buffer.started' });
     channel?.message({ type: 'response.output_audio_transcript.delta', response_id: 'resp-1', delta: 'مر' });
     channel?.message({ type: 'response.output_audio_transcript.done', response_id: 'resp-1', transcript: 'مرحبا' });
     channel?.message({ type: 'input_audio_buffer.speech_started' });
-    expect(subject.states).toEqual(expect.arrayContaining(['LISTENING', 'THINKING', 'BUDDY_SPEAKING', 'USER_SPEAKING']));
+    expect(subject.states).toEqual(expect.arrayContaining(['LISTENING', 'MODEL_PROCESSING', 'ASSISTANT_AUDIO_STARTED', 'SPEECH_STARTED']));
     expect(subject.transcripts).toEqual([{ key: 'resp-1', role: 'assistant', text: 'مر', final: false }, { key: 'resp-1', role: 'assistant', text: 'مرحبا', final: true }]);
     expect(channel?.sent.map((value) => JSON.parse(value).type)).toEqual(expect.arrayContaining(['response.cancel', 'output_audio_buffer.clear']));
   });
 
   it('accepts only the internal Buddy request and returns bounded function output', async () => {
-    const subject = harness(); await subject.client.start('es'); const channel = subject.peers[0]?.channel; channel?.open();
+    const subject = harness(); await startAndOpen(subject, 'es'); const channel = subject.peers[0]?.channel;
     channel?.message({ type: 'response.output_item.done', item: { type: 'function_call', name: 'buddy_webmcp_request', call_id: 'call-1', arguments: '{"request":"Show the latest articles"}' } });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(subject.onToolRequest).toHaveBeenCalledWith('Show the latest articles', expect.any(Object));
@@ -116,28 +126,58 @@ describe('RealtimeVoiceClient', () => {
   });
 
   it('closes the channel, peer, remote audio, and every microphone track', async () => {
-    const subject = harness(); await subject.client.start('en'); const peer = subject.peers[0]; const channel = peer?.channel; channel?.open();
+    const subject = harness(); await startAndOpen(subject); const peer = subject.peers[0]; const channel = peer?.channel;
     subject.client.stop();
     expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(peer?.closed).toBe(true); expect(channel?.readyState).toBe('closed'); expect(subject.audio.pause).toHaveBeenCalled(); expect(subject.audio.remove).toHaveBeenCalled(); expect(subject.client.currentState).toBe('IDLE');
   });
 
   it('ends Voice Mode and releases transport when the microphone device disappears', async () => {
-    const subject = harness(); await subject.client.start('en'); const peer = subject.peers[0]; peer?.channel.open();
+    const subject = harness(); await startAndOpen(subject); const peer = subject.peers[0];
     subject.stream.track.end();
     expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(peer?.closed).toBe(true); expect(subject.client.currentState).toBe('IDLE'); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('MICROPHONE_DEVICE_LOST');
   });
 
-  it('ends an open session after two minutes without speech', async () => {
+  it('ends an open session after the no-speech timeout', async () => {
     vi.useFakeTimers();
-    const subject = harness(); await subject.client.start('en'); const peer = subject.peers[0]; peer?.channel.open();
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(peer?.closed).toBe(true); expect(subject.client.currentState).toBe('IDLE'); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('VOICE_IDLE_TIMEOUT');
+    const subject = harness(); await startAndOpen(subject); const peer = subject.peers[0];
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(peer?.closed).toBe(true); expect(subject.client.currentState).toBe('IDLE'); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('NO_SPEECH_TIMEOUT');
     vi.useRealTimers();
+  });
+
+  it('times out when the data channel never opens and cleans up', async () => {
+    vi.useFakeTimers();
+    const subject = harness({ timeouts: { dataChannelMs: 50, peerMs: 50 } });
+    const pending = subject.client.start('en'); const assertion = expect(pending).rejects.toThrow('DATA_CHANNEL_TIMEOUT');
+    await vi.advanceTimersByTimeAsync(0); expect(subject.peers).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(50); await assertion;
+    expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentState).toBe('ERROR');
+    vi.useRealTimers();
+  });
+
+  it('recovers when speech ends but no model response arrives', async () => {
+    vi.useFakeTimers();
+    const subject = harness({ timeouts: { postSpeechResponseMs: 75, noSpeechMs: 1_000 } });
+    const pending = subject.client.start('en'); await vi.advanceTimersByTimeAsync(0); subject.peers[0]?.channel.open(); await pending;
+    subject.peers[0]?.channel.message({ type: 'input_audio_buffer.speech_started' });
+    subject.peers[0]?.channel.message({ type: 'input_audio_buffer.speech_stopped' });
+    await vi.advanceTimersByTimeAsync(75);
+    expect(subject.errors.at(-1)).toEqual(expect.objectContaining({ code: 'POST_SPEECH_RESPONSE_TIMEOUT', message: expect.stringContaining("I heard you") }));
+    expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentState).toBe('IDLE');
+    vi.useRealTimers();
+  });
+
+  it('reports remote audio playback failures without confusing the mute preference', async () => {
+    const subject = harness({ audioPlay: vi.fn(async () => { throw new DOMException('blocked', 'NotAllowedError'); }) }); await startAndOpen(subject);
+    const peer = subject.peers[0]; peer?.ontrack?.({ streams: [subject.stream], track: subject.stream.track } as unknown as RTCTrackEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(subject.errors.at(-1)).toEqual(expect.objectContaining({ code: 'AUDIO_PLAYBACK_BLOCKED' }));
+    expect(subject.client.currentDiagnostics.audioPlaySucceeded).toBe(false); subject.client.stop();
   });
 
   it('bounds reconnect attempts and then releases the microphone', async () => {
     vi.useFakeTimers();
-    const subject = harness(); await subject.client.start('en'); subject.peers[0]?.channel.open();
+    const subject = harness(); await startAndOpen(subject);
     vi.mocked(subject.provider.createSession).mockRejectedValue(new Error('provider down'));
     const first = subject.peers[0]; if (!first) throw new Error('Missing peer.'); first.connectionState = 'failed'; first.onconnectionstatechange?.();
     await vi.advanceTimersByTimeAsync(2_100);
@@ -147,12 +187,12 @@ describe('RealtimeVoiceClient', () => {
 
   it('keeps one activation-wide session deadline across a reconnect', async () => {
     vi.useFakeTimers();
-    const subject = harness({ maxSessionSeconds: 60 }); await subject.client.start('en'); subject.peers[0]?.channel.open();
+    const subject = harness({ maxSessionSeconds: 60, timeouts: { noSpeechMs: 120_000 } }); await startAndOpen(subject);
     await vi.advanceTimersByTimeAsync(30_000);
     const first = subject.peers[0]; if (!first) throw new Error('Missing peer.'); first.connectionState = 'disconnected'; first.onconnectionstatechange?.();
     await vi.advanceTimersByTimeAsync(500); subject.peers[1]?.channel.open();
-    await vi.advanceTimersByTimeAsync(29_499); expect(subject.stream.track.stop).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1); expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('SESSION_LIMIT_REACHED'); expect(subject.client.currentState).toBe('IDLE');
+    await vi.advanceTimersByTimeAsync(28_000); expect(subject.stream.track.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000); expect(subject.stream.track.stop).toHaveBeenCalledOnce(); expect(subject.client.currentDiagnostics.lastSafeErrorCode).toBe('SESSION_LIMIT_REACHED'); expect(subject.client.currentState).toBe('IDLE');
     vi.useRealTimers();
   });
 });

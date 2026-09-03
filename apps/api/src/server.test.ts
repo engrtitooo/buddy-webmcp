@@ -138,6 +138,9 @@ describe('Buddy API', () => {
     expect(schema).not.toHaveProperty('anyOf'); expect(schema).not.toHaveProperty('oneOf'); expectClosedObjectSchemas(schema);
     expect(schema.required).toEqual(['kind', 'toolName', 'argsJson', 'label', 'reason', 'message']);
     expect(Object.keys(schema.properties as Record<string, unknown>)).not.toEqual(expect.arrayContaining(['args', 'risk', 'callId']));
+    const exactProviderInput = JSON.parse(String(providerBody?.input)) as AgentNextInput;
+    expect(exactProviderInput.tools[0]?.inputSchema).toEqual(tool.inputSchema);
+    expect(exactProviderInput.tools[0]?.inputSchema).not.toHaveProperty('catalog');
   });
 
   it('lets “Show what you can do” reach the provider boundary on turn zero', async () => {

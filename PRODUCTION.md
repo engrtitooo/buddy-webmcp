@@ -38,7 +38,7 @@ The service exposes `GET /health`, `POST /agent/next`, and `POST /realtime/sessi
 
 No new secret is required for Voice Mode. `OPENAI_API_KEY` remains server-side and is reused for both Responses and Realtime. The optional Realtime values above default safely when absent. The browser receives only an SDP answer and bounded non-secret diagnostics; it never receives the key, an authorization header, or arbitrary provider configuration.
 
-Voice Mode incurs paid Realtime audio and transcription usage for the duration of each connection. It is opt-in and client-cleaned at two minutes of speech inactivity or the configured session cap, but the included cap is enforced by the trusted extension after bootstrap. Treat provider project budgets, usage alerts, gateway authentication/attestation, and a durable distributed session limiter as the authoritative production cost controls. Chrome prompts for microphone access only after the waveform button is pressed; no `microphone` manifest permission is added.
+Voice Mode incurs paid Realtime audio and transcription usage for the duration of each connection. It is opt-in and client-cleaned after 30 seconds without initial speech, 20 seconds after speech without a response, two minutes of general inactivity, or the configured session cap. Treat provider project budgets, usage alerts, gateway authentication/attestation, and a durable distributed session limiter as the authoritative production cost controls. Chrome prompts for microphone access only after the waveform button is pressed; no `microphone` manifest permission is added.
 
 The model-facing Structured Output is a fixed root object with no root union and no additional properties. Tool arguments cross that boundary only as `argsJson`; the API parses the string, requires a plain object, validates it against the current tool schema, computes risk locally, and creates a local call ID before returning an internal decision.
 
@@ -59,7 +59,7 @@ The smoke test uses a synthetic tool and the same request builder as the API, pr
 4. Choose **Deploy Latest Commit**. A plain **Redeploy** can rebuild the previous deployment, so use the latest-commit action when source changed.
 5. Wait for the deployment to become Active and confirm the startup log says the Buddy API is listening.
 6. Read `https://buddy-mcp-production.up.railway.app/health`. Compare its full `commit` value with the commit shown on GitHub for `main` (or local `git rev-parse origin/main`). Confirm `contractVersion` is `2`.
-7. Send the Cloverbase test request and locate its `requestId` in Railway logs. A validation error now includes `errorCode`, `validationStage`, and, when applicable, `toolName`; goals and secrets are not logged.
+7. Send the Cloverbase test request and locate its `requestId` in Railway logs. Correlate the safe `buddy_agent_turn`, `buddy_agent_decision`, `buddy_tool_validation_failed`, `buddy_agent_final`, and `buddy_realtime_session_created` events; goals, result bodies, credentials, and secret argument values are not logged.
 
 The pre-fix production health response was only `{"status":"ok"}`. That proves the deployed service did not yet have commit reporting, so an extension/API commit mismatch for the failing capture cannot be established retrospectively. After this deployment, the health fields make the check deterministic.
 
@@ -90,7 +90,15 @@ npm run build:production -w @buddy/extension
 npm run verify:production-manifest -w @buddy/extension
 ```
 
-Then open `chrome://extensions`, find Buddy, choose **Reload**, and refresh every open Cloverbase tab. If loading it for the first time, choose **Load unpacked** and select `apps/extension/dist`. Confirm the extension ID's exact `chrome-extension://<id>` origin remains in Railway's `ALLOWED_ORIGINS`.
+Then open `chrome://extensions`, find Buddy version `0.1.2`, choose **Reload**, and refresh every open test tab. If loading it for the first time, choose **Load unpacked** and select `apps/extension/dist`. Confirm the extension ID's exact `chrome-extension://<id>` origin remains in Railway's `ALLOWED_ORIGINS`.
+
+### Production regression checklist
+
+1. On `https://www.rarebeauty.com`, confirm the page and Buddy content script remain healthy. In Developer Mode, an incompatible individual tool may report `incompatible-definition-or-schema`, but other compatible tools must remain available and no generated AJV function error may appear.
+2. On the catalog test site, inspect the advertised `search_catalog` schema in Developer Mode. Ask for **skincare products under $100** and confirm the executed arguments match that exact schema: flat `{ "query": "..." }` stays flat, while a genuinely nested schema stays nested. Invalid arguments must not execute and receive at most one repair turn.
+3. For a typed read request, confirm one successful action creates a clear observation and Buddy returns a final answer. Repeat an equivalent search and confirm Buddy stops before the ten-turn ceiling.
+4. For voice, confirm the UI moves through microphone, peer, channel, listening, speech, processing, playback, and idle states; transcripts appear; a read request travels through the normal Activity/approval pipeline; and the result is spoken.
+5. Deny microphone access, block the data channel, and block autoplay in separate trials. Confirm Browser Speech fallback is offered for connection failures, every track/peer/channel/audio object is cleaned up, and playback failure reports `AUDIO_PLAYBACK_BLOCKED` in Developer Mode.
 
 ### Cloverbase production check
 
@@ -125,4 +133,4 @@ npm run lint
 npm run build
 ```
 
-Then build extension version `0.1.1` once more in production mode with the real API URL, inspect `apps/extension/dist/manifest.json`, scan `content.js` and `background.js` for secrets, load it in Chrome, and run the Cloverbase text and continuous-voice checks above.
+Then build extension version `0.1.2` once more in production mode with the real API URL, inspect `apps/extension/dist/manifest.json`, scan `content.js` and `background.js` for secrets, load it in Chrome, and run the Cloverbase, Rare Beauty, catalog, text, and continuous-voice checks above.

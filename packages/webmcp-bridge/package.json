@@ -1,1 +1,1 @@
-{"name":"@buddy/webmcp-bridge","private":true,"type":"module","exports":{".":"./src/index.ts"}}
+{"name":"@buddy/webmcp-bridge","private":true,"type":"module","exports":{".":"./src/index.ts"},"dependencies":{"@buddy/agent-core":"*","@buddy/shared":"*"}}

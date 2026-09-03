@@ -14,7 +14,7 @@ export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: str
 export interface AvatarPosition { x: number; y: number }
 export interface StoredSettings { locale: Locale | 'auto'; muted: boolean; theme: 'light' | 'dark' | 'system'; developerMode: boolean; voiceSubmissionMode: VoiceSubmissionMode; rules: AgentRules; position?: AvatarPosition }
 type ToolCall = Extract<AgentDecision, { kind: 'tool_call' }>;
-interface RunContext { id: number; sessionId: string; goal: string; expectedRevision: number; nextTurn: number; observations: AgentObservation[]; guard: RepeatedToolCallGuard; controller: AbortController; pending: ToolCall | undefined; voice: { resolve: (result: VoiceToolResult) => void; controls: VoiceToolControls } | undefined }
+interface RunContext { id: number; sessionId: string; goal: string; expectedRevision: number; nextTurn: number; observations: AgentObservation[]; guard: RepeatedToolCallGuard; repairAttempts: Map<string, number>; controller: AbortController; pending: ToolCall | undefined; lastDecision?: AgentDecision['kind']; lastTool?: string; convergenceReason?: string; voice: { resolve: (result: VoiceToolResult) => void; controls: VoiceToolControls } | undefined }
 
 export interface BuddyAdapter {
   isSupported(): boolean;
@@ -67,6 +67,27 @@ async function loadSettings(store: BuddySettingsStore): Promise<StoredSettings> 
 function boundedResult(value: unknown): unknown {
   const serialized = safeJson(value, AGENT_LIMITS.maxResultCharacters);
   try { return JSON.parse(serialized) as unknown; } catch { return serialized; }
+}
+
+function sanitizeDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
+  if (/password|secret|token|authorization|cookie|credential|credit.?card|ssn|passport|medical|health/i.test(key)) return '[redacted]';
+  if (depth > 4) return '[bounded]';
+  if (typeof value === 'string') return `[string:${value.length}]`;
+  if (typeof value === 'number') return '[number]';
+  if (typeof value === 'boolean') return '[boolean]';
+  if (value === null) return '[null]';
+  if (Array.isArray(value)) return value.slice(0, 8).map((item) => sanitizeDiagnosticValue(item, key, depth + 1));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 24).map(([nestedKey, nested]) => [nestedKey, sanitizeDiagnosticValue(nested, nestedKey, depth + 1)]));
+  return undefined;
+}
+
+function summarizeObservation(observation: AgentObservation | undefined): string {
+  if (!observation) return 'none';
+  if (observation.outcome !== 'success') return `${observation.outcome}:${(observation.error ?? '').slice(0, 120)}`;
+  const result = observation.result;
+  if (Array.isArray(result)) return `success:array(${result.length})`;
+  if (result && typeof result === 'object') return `success:object(${Object.keys(result).slice(0, 12).join(',')})`;
+  return `success:${typeof result}`;
 }
 
 export function upsertVoiceTranscript(items: ChatMessage[], update: { key: string; role: ChatMessage['role']; text: string; final: boolean }): ChatMessage[] {
@@ -238,14 +259,32 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
   const updateActivity = (id: string, patch: Partial<ActivityItem>) => setActivity((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item));
   const stopRun = (run: RunContext) => { if (activeRun.current?.id === run.id) activeRun.current = undefined; };
 
-  const executeCall = async (run: RunContext, call: ToolCall) => {
+  const logIteration = (run: RunContext, turn: number, decision: AgentDecision, executionStatus: string, repeatedCall: boolean) => {
+    if (!settings.developerMode) return;
+    console.debug('buddy_agent_iteration', {
+      sessionId: run.sessionId,
+      turn,
+      decisionKind: decision.kind,
+      toolName: 'toolName' in decision ? decision.toolName : undefined,
+      sanitizedArgs: 'args' in decision ? sanitizeDiagnosticValue(decision.args) : undefined,
+      executionStatus,
+      observationKind: run.observations.at(-1)?.outcome ?? 'none',
+      observationSummary: summarizeObservation(run.observations.at(-1)),
+      repeatedCall,
+      toolInventoryRevision: run.expectedRevision,
+    });
+  };
+
+  const executeCall = async (run: RunContext, call: ToolCall): Promise<{ text: string; repeatedResult: boolean }> => {
     const started = performance.now(); setState('EXECUTING'); updateActivity(call.callId, { status: 'running' });
     try {
       const result = await adapter.execute(call.toolName, call.args, run.controller.signal, run.expectedRevision);
       const step: PlanStep = { id: call.callId, toolName: call.toolName, args: call.args, label: call.label, risk: call.risk };
       const text = await provider.interpretToolResult(step, result);
       updateActivity(call.callId, { status: 'done', detail: text, technical: { tool: call.toolName, durationMs: Math.round(performance.now() - started), request: call.args, response: result } });
-      run.observations.push({ callId: call.callId, toolName: call.toolName, args: call.args, outcome: 'success', result: boundedResult(result) });
+      const bounded = boundedResult(result);
+      run.observations.push({ callId: call.callId, toolName: call.toolName, args: call.args, outcome: 'success', result: bounded });
+      return { text, repeatedResult: run.guard.recordSuccess(call, bounded) };
     } catch (error) {
       if (run.controller.signal.aborted) throw error;
       const text = error instanceof Error ? error.message : 'The site could not complete that action.';
@@ -262,18 +301,35 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
         const raw = await provider.next({ sessionId: run.sessionId, turn, goal: run.goal, tools, observations: run.observations }, run.controller.signal);
         if (adapter.getRevision() !== run.expectedRevision) throw new Error('The site actions changed. Please review a fresh request.');
         const decision = normalizeAgentDecisionOrRejection(raw, tools);
+        run.lastDecision = decision.kind; if ('toolName' in decision) run.lastTool = decision.toolName;
         if (decision.kind === 'final' || decision.kind === 'needs_input') {
+          logIteration(run, turn, decision, 'not_applicable', false);
           if (run.voice) { run.voice.resolve({ status: 'completed', message: decision.message }); run.voice = undefined; }
           else addMessage('assistant', decision.message);
           setState(decision.kind === 'final' ? 'SUCCESS' : 'IDLE'); stopRun(run); return;
         }
         if (decision.kind === 'rejected_tool_call') {
-          run.guard.assertNew(decision);
+          const repairs = (run.repairAttempts.get(decision.toolName) ?? 0) + 1;
+          run.repairAttempts.set(decision.toolName, repairs);
           run.observations.push({ callId: decision.callId, toolName: decision.toolName, args: decision.args, outcome: 'rejected', error: decision.message });
           setActivity((items) => [...items, { id: decision.callId, label: 'Correct invalid action details', status: 'failed', detail: 'Buddy rejected invalid arguments and asked the AI to correct them.', technical: { tool: decision.toolName, request: decision.args, response: decision.message } }]);
+          logIteration(run, turn, decision, 'validation_rejected', repairs > 1);
+          if (repairs > 1) {
+            run.convergenceReason = 'schema repair failed twice';
+            const message = "I couldn't safely prepare valid action details after one correction attempt, so I stopped without executing it.";
+            if (run.voice) { run.voice.resolve({ status: 'failed', message }); run.voice = undefined; } else addMessage('assistant', message);
+            setState('IDLE'); stopRun(run); return;
+          }
           continue;
         }
-        run.guard.assertNew(decision);
+        try { run.guard.assertNew(decision); }
+        catch {
+          run.convergenceReason = 'semantically repeated tool call';
+          logIteration(run, turn, decision, 'not_executed', true);
+          const message = 'I already tried that site action with the same details. I stopped the loop safely; the previous result is still available above.';
+          if (run.voice) { run.voice.resolve({ status: 'completed', message }); run.voice = undefined; } else addMessage('assistant', message);
+          setState('SUCCESS'); stopRun(run); return;
+        }
         const actionLabel = createApprovalActionLabel(decision.label, decision.toolName);
         const displayCall = { ...decision, label: actionLabel };
         setActivity((items) => [...items, { id: decision.callId, label: actionLabel, status: 'pending' }]);
@@ -289,9 +345,23 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
           const reviewedCall = { ...displayCall, args: reviewed.args };
           run.pending = reviewedCall; setApproval({ step: { id: reviewedCall.callId, toolName: reviewedCall.toolName, args: reviewedCall.args, label: reviewedCall.label, risk: reviewedCall.risk }, what: reviewedCall.label, why: reviewedCall.reason, argumentsJson: reviewed.argumentsJson, site: siteName, risk: reviewedCall.risk }); setState('WAITING_FOR_APPROVAL'); run.voice?.controls.announceApprovalRequired(); return;
         }
-        await executeCall(run, displayCall);
+        const execution = await executeCall(run, displayCall);
+        logIteration(run, turn, decision, 'success', execution.repeatedResult);
+        if (execution.repeatedResult) {
+          run.convergenceReason = 'same tool returned the same semantic result';
+          const message = `${execution.text} The site returned the same information again, so I stopped repeating the search.`;
+          if (run.voice) { run.voice.resolve({ status: 'completed', message }); run.voice = undefined; } else addMessage('assistant', message);
+          setState('SUCCESS'); stopRun(run); return;
+        }
       }
-      if (!run.controller.signal.aborted && activeRun.current?.id === run.id) throw new Error('Buddy reached its safe action limit and stopped.');
+      if (!run.controller.signal.aborted && activeRun.current?.id === run.id) {
+        run.convergenceReason ??= 'the provider did not return final before the hard safety ceiling';
+        const normalMessage = "I couldn't finish because the site actions did not produce a conclusive answer. I stopped safely and made no further changes.";
+        const diagnostic = settings.developerMode ? ` [last decision: ${run.lastDecision ?? 'none'} · last tool: ${run.lastTool ?? 'none'} · last observation: ${run.observations.at(-1)?.outcome ?? 'none'} · reason: ${run.convergenceReason}]` : '';
+        const message = `${normalMessage}${diagnostic}`;
+        if (run.voice) { run.voice.resolve({ status: 'failed', message }); run.voice = undefined; } else addMessage('assistant', message);
+        setState('ERROR'); stopRun(run); return;
+      }
     } catch (error) {
       if (!run.controller.signal.aborted) {
         setState('ERROR');
@@ -309,7 +379,7 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
     if (!voiceControls) addMessage('user', cleanGoal); setInput('');
     let resolveVoice: ((result: VoiceToolResult) => void) | undefined;
     const result = voiceControls ? new Promise<VoiceToolResult>((resolve) => { resolveVoice = resolve; }) : undefined;
-    const run: RunContext = { id: ++runSequence.current, sessionId: crypto.randomUUID(), goal: cleanGoal, expectedRevision: adapter.getRevision(), nextTurn: 0, observations: [], guard: new RepeatedToolCallGuard(), controller: new AbortController(), pending: undefined, voice: voiceControls && resolveVoice ? { resolve: resolveVoice, controls: voiceControls } : undefined };
+    const run: RunContext = { id: ++runSequence.current, sessionId: crypto.randomUUID(), goal: cleanGoal, expectedRevision: adapter.getRevision(), nextTurn: 0, observations: [], guard: new RepeatedToolCallGuard(), repairAttempts: new Map(), controller: new AbortController(), pending: undefined, voice: voiceControls && resolveVoice ? { resolve: resolveVoice, controls: voiceControls } : undefined };
     activeRun.current = run; void continueRun(run);
     if (result) return result;
     return { status: 'completed', message: 'Buddy finished the text request.' };
@@ -342,7 +412,8 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
         const reason = error instanceof DOMException && error.name === 'NotAllowedError' ? 'microphone-permission-denied' : error instanceof Error ? error.message : 'realtime-unavailable';
         if (reason === 'microphone-permission-denied') { setVoiceMode('off'); return; }
         setVoiceMode('browser-fallback'); setVoiceDiagnostics((current) => ({ ...current, voiceMode: 'browser-fallback', fallbackReason: reason }));
-        addMessage('assistant', 'Realtime voice is unavailable, so Buddy switched to browser voice fallback. Press the waveform again to speak.');
+        addMessage('assistant', 'Realtime voice is unavailable, so Buddy switched to browser voice fallback.');
+        await listen();
         return;
       }
     }
@@ -360,7 +431,8 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
   if (!tools.length) return null;
   const tooltip = `${t.detected} ${t.found(capabilities.length)}`; const busy = state === 'EXECUTING' || state === 'THINKING';
   const voiceActive = voiceMode === 'realtime' && voiceState !== 'IDLE' && voiceState !== 'ERROR';
-  const voiceStatus: Partial<Record<RealtimeVoiceState, string>> = { CONNECTING: 'Connecting…', LISTENING: 'Listening…', USER_SPEAKING: 'Listening…', THINKING: 'Thinking…', BUDDY_SPEAKING: 'Speaking…', WAITING_FOR_APPROVAL: 'Waiting for approval…', RECONNECTING: 'Reconnecting…', STOPPING: 'Ending voice…', ERROR: 'Voice unavailable' };
+  const voiceConnecting = ['VOICE_CONNECTING', 'MIC_ACQUIRED', 'PEER_CONNECTING', 'PEER_CONNECTED'].includes(voiceState);
+  const voiceStatus: Partial<Record<RealtimeVoiceState, string>> = { VOICE_CONNECTING: 'Starting Voice Mode…', MIC_ACQUIRED: 'Microphone ready…', PEER_CONNECTING: 'Connecting…', PEER_CONNECTED: 'Voice connected…', DATA_CHANNEL_OPEN: 'Voice channel ready…', LISTENING: 'Listening…', SPEECH_STARTED: 'Hearing you…', SPEECH_STOPPED: 'Speech received…', USER_TRANSCRIPT: 'Transcript ready…', MODEL_PROCESSING: 'Thinking…', ASSISTANT_AUDIO_STARTED: 'Speaking…', ASSISTANT_AUDIO_FINISHED: 'Finished speaking', WAITING_FOR_APPROVAL: 'Waiting for approval…', RECONNECTING: 'Reconnecting…', STOPPING: 'Ending voice…', ERROR: 'Voice unavailable' };
   const rootStyle = ({ '--buddy-voice-level': microphoneLevel.toFixed(2) } as CSSProperties);
   return <div ref={rootRef} className={`buddy-root buddy-theme-${settings.theme}`} style={rootStyle} dir={directionFor(locale)} data-buddy-state={state} data-voice-state={voiceState}>
     {showNotice && !open && <div className="buddy-wake-notice" role="status">{t.detected}<span>{t.found(capabilities.length)}</span></div>}
@@ -373,7 +445,7 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
         {tab === 'capabilities' && <section><div className="buddy-section-title"><Sparkles/><div><h3>What I can do here</h3><p>Translated into everyday language.</p></div></div><div className="buddy-capabilities">{capabilities.map((capability) => <article key={capability.id}><span>{capability.label}</span><p>{capability.description}</p>{settings.developerMode && <code>{capability.toolNames.join(', ')}</code>}</article>)}</div></section>}
         {tab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} voiceSupported={Boolean(realtimeProvider?.supported || (speech.supported && voice.supported))} voiceDiagnostics={voiceDiagnostics}/>}
       </div>
-      {tab === 'chat' && <footer className="buddy-composer"><div className="buddy-suggestions"><button onClick={() => setInput('Show what you can do')}>Show what you can do</button><button onClick={() => setInput('Help me choose the best option')}>Help me choose</button></div><form onSubmit={submit}><label className="buddy-sr-only" htmlFor="buddy-goal">{t.placeholder}</label><textarea id="buddy-goal" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} rows={2} maxLength={AGENT_LIMITS.maxGoalLength}/><div className="buddy-compose-actions"><button type="button" className={`buddy-voice-button voice-${voiceState.toLowerCase()}`} onClick={() => void toggleVoice()} aria-label={voiceActive ? 'End voice conversation' : 'Start voice conversation'} aria-pressed={voiceActive}><span className="buddy-waveform" aria-hidden="true">{[0,1,2,3,4].map((bar) => <i key={bar}/>)}</span></button><button type="submit" className="buddy-send" disabled={!input.trim() || busy || state === 'WAITING_FOR_APPROVAL'} aria-label="Send goal"><Send/></button></div></form>{(voiceActive || voiceMode === 'browser-fallback' || voiceState === 'ERROR') && <div className="buddy-voice-status" role="status"><span className={voiceActive ? 'active' : ''}/>{voiceMode === 'browser-fallback' ? 'Browser voice fallback' : voiceStatus[voiceState]}</div>}</footer>}
+        {tab === 'chat' && <footer className="buddy-composer"><div className="buddy-suggestions"><button onClick={() => setInput('Show what you can do')}>Show what you can do</button><button onClick={() => setInput('Help me choose the best option')}>Help me choose</button></div><form onSubmit={submit}><label className="buddy-sr-only" htmlFor="buddy-goal">{t.placeholder}</label><textarea id="buddy-goal" value={input} onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} rows={2} maxLength={AGENT_LIMITS.maxGoalLength}/><div className="buddy-compose-actions"><button type="button" className={`buddy-voice-button voice-${voiceState.toLowerCase()}`} onClick={() => void toggleVoice()} disabled={voiceConnecting} aria-label={voiceActive ? 'End voice conversation' : 'Start voice conversation'} aria-pressed={voiceActive}><span className="buddy-waveform" aria-hidden="true">{[0,1,2,3,4].map((bar) => <i key={bar}/>)}</span></button><button type="submit" className="buddy-send" disabled={!input.trim() || busy || state === 'WAITING_FOR_APPROVAL'} aria-label="Send goal"><Send/></button></div></form>{(voiceActive || voiceMode === 'browser-fallback' || voiceState === 'ERROR') && <div className="buddy-voice-status" role="status"><span className={voiceActive ? 'active' : ''}/>{voiceMode === 'browser-fallback' ? 'Browser voice fallback' : voiceStatus[voiceState]}</div>}</footer>}
     </aside>}
     <Mascot state={state} onActivate={onMascotActivate} onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onKeyDown={onMascotKey} label={tooltip} buttonRef={mascotRef} position={position}/>
   </div>;

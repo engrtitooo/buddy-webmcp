@@ -26,6 +26,8 @@ import {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const jsonLength = (value: unknown) => { try { return JSON.stringify(value).length; } catch { return Number.POSITIVE_INFINITY; } };
+const logEvent = (event: string, details: Record<string, unknown>) => console.info(JSON.stringify({ event, ...details }));
+const sanitizedArgumentShape = (args: Record<string, unknown> | undefined) => args ? Object.fromEntries(Object.entries(args).slice(0, 24).map(([key, value]) => [key, /password|secret|token|authorization|cookie|credential|credit.?card|ssn|passport|medical|health/i.test(key) ? 'redacted' : Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value])) : undefined;
 
 export class RequestError extends Error {
   constructor(
@@ -214,6 +216,7 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
           if (!response.ok) { errorReply(response.status === 429 ? 429 : 502, response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', 'Realtime provider request failed', 'provider'); return; }
           const answer = await response.text();
           if (!validateRealtimeSdp(answer)) { errorReply(502, 'PROVIDER_ERROR', 'Realtime provider returned an invalid answer', 'provider'); return; }
+          logEvent('buddy_realtime_session_created', { requestId, model: realtime.model, voice: realtime.voice, locale, vadMode: 'semantic_vad' });
           reply(201, answer, undefined, {
             'content-type': 'application/sdp',
             'x-buddy-realtime-model': realtime.model,
@@ -233,6 +236,7 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
     if (!apiKey) { errorReply(503, 'PROVIDER_ERROR', 'AI provider is not configured', 'provider'); return; }
     try {
       const input = parseAgentNextInput(await readJsonBody(req));
+      logEvent('buddy_agent_turn', { requestId, sessionId: input.sessionId, turn: input.turn, toolCount: input.tools.length, observationCount: input.observations.length, lastObservationStatus: input.observations.at(-1)?.outcome ?? 'none' });
       const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetchImpl('https://api.openai.com/v1/responses', {
@@ -242,7 +246,11 @@ export function createBuddyServer(options: BuddyServerOptions = {}): Server {
         });
         if (!response.ok) { errorReply(response.status === 429 ? 429 : 502, response.status === 429 ? 'RATE_LIMITED' : 'PROVIDER_ERROR', 'Provider request failed', 'provider'); return; }
         const text = extractOpenAIOutputText(await response.json()); if (!text) throw new Error('Empty provider result');
-        const decision = normalizeOpenAIModelDecision(JSON.parse(text), input.tools); reply(200, decision);
+        const decision = normalizeOpenAIModelDecision(JSON.parse(text), input.tools);
+        logEvent('buddy_agent_decision', { requestId, sessionId: input.sessionId, turn: input.turn, decisionKind: decision.kind, toolName: 'toolName' in decision ? decision.toolName : undefined, sanitizedArgs: 'args' in decision ? sanitizedArgumentShape(decision.args) : undefined });
+        if (decision.kind === 'rejected_tool_call') logEvent('buddy_tool_validation_failed', { requestId, sessionId: input.sessionId, turn: input.turn, toolName: decision.toolName });
+        if (decision.kind === 'final') logEvent('buddy_agent_final', { requestId, sessionId: input.sessionId, turn: input.turn });
+        reply(200, decision);
       } finally { clearTimeout(timeout); }
     } catch (error) {
       if (error instanceof RequestError) { errorReply(error.status, error.errorCode, error.message, error.validationStage, error.toolName); return; }

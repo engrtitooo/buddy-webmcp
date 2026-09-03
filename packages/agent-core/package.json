@@ -1,1 +1,1 @@
-{"name":"@buddy/agent-core","private":true,"type":"module","exports":{".":"./src/index.ts"},"dependencies":{"ajv":"^8.20.0"}}
+{"name":"@buddy/agent-core","private":true,"type":"module","exports":{".":"./src/index.ts"}}
