@@ -1,20 +1,41 @@
 # Buddy
 
-**Buddy is the friendly interface for the agentic web.**
+**The friendly interface for the agentic web.**
 
-Buddy is a consumer-facing Chrome companion that wakes up when a website exposes [WebMCP](https://developer.chrome.com/docs/ai/webmcp) tools, translates those tools into everyday capabilities, and helps a person complete goals through text or voice—with explicit approval before consequential actions.
+Buddy is a Chrome companion that wakes up when a website exposes [WebMCP](https://developer.chrome.com/docs/ai/webmcp) tools, translates those structured capabilities into human language, and helps people complete goals through text or voice—while applying deterministic approval rules before consequential actions.
 
 > WebMCP gives websites capabilities. Buddy gives those capabilities a face, a voice, and your rules.
 
-## The problem
+**[Open the live Buddy Market WebMCP Playground](https://buddy-webmcp-market.engrtitooo.chatgpt.site/)**
 
-WebMCP gives agents reliable, structured website actions, but raw tool names and schemas are not a consumer interface. People need to understand what a site allows, state an outcome rather than choose a function, and remain in control when an action sends, buys, submits, shares, or deletes.
+## What is Buddy?
 
-## The solution
+Buddy is the actual product: a portable, consumer-facing Chrome companion for the WebMCP web. It renders nothing on ordinary websites. When a compatible site intentionally advertises tools, Buddy wakes up, explains the available capabilities in everyday language, and lets the person describe an outcome instead of selecting individual functions.
 
-Buddy is completely absent on ordinary sites. On compatible sites it wakes up, summarizes capabilities in human language, accepts a goal, selects and validates one advertised WebMCP action at a time, executes safe work, and pauses at a visible approval card when the user's rules require it.
+Buddy plans and carries out safe work one structured action at a time, provides a readable activity trail, and pauses at a visible approval card whenever local deterministic rules require a decision. The same interface supports text, voice, English, Arabic/RTL, and Spanish.
 
-Buddy Market is the included WebMCP Playground: a polished fictional marketplace with 20 products and no real transactions. Search, filters, comparisons, cart state, delivery preferences, and the simulated checkout visibly respond to WebMCP execution.
+## What is Buddy Market?
+
+**Buddy Market is not the product. It is the included WebMCP Playground used to demonstrate Buddy safely.**
+
+It is a fictional marketplace with 20 products, 10 real registered WebMCP tools, and simulated transactions. Search, filters, comparisons, cart state, delivery preferences, and checkout visibly respond to WebMCP execution; no payment is collected and no real purchase occurs.
+
+## Why WebMCP?
+
+Without a structured capability contract, browser agents often have to interpret visual pages and interact indirectly. WebMCP lets a website intentionally expose typed actions with descriptions, JSON Schema inputs, and execution semantics.
+
+Buddy builds on that contract to provide discoverability, more reliable and explainable actions, an auditable activity trail, and clear approval boundaries. It uses only the tools a compatible site advertises; it does not scrape the page or invent capabilities.
+
+## Why Buddy?
+
+WebMCP defines how websites expose capabilities. Buddy addresses the human experience around those capabilities. **Buddy is a consumer interface layer for the WebMCP web.**
+
+- Natural goals instead of manual tool selection
+- Human-readable capabilities instead of raw names and schemas
+- Portable preferences and deterministic approval rules
+- Visible execution, approval cards, and activity history
+- Text and voice interaction
+- English, Arabic/RTL, and Spanish interface support
 
 ## Current WebMCP implementation
 
@@ -62,6 +83,46 @@ packages/
 
 Full decisions are documented in [ARCHITECTURE.md](./ARCHITECTURE.md), the threat model in [SECURITY.md](./SECURITY.md), and the submission story in [HACKATHON.md](./HACKATHON.md).
 
+## Judge Quick Start
+
+This is the shortest fully supported local-extension path. It uses the real OpenAI-backed agent, so an API key is required and remains server-side.
+
+1. Clone the repository and install dependencies:
+
+   ```bash
+   git clone https://github.com/engrtitooo/buddy-webmcp.git
+   cd buddy-webmcp
+   npm install
+   ```
+
+2. Build the workspace. The development extension is configured for the local API at `http://127.0.0.1:8787`:
+
+   ```bash
+   npm run build
+   ```
+
+3. In Chrome 149+, open `chrome://flags/#enable-webmcp-testing`, enable WebMCP testing support if required, and relaunch Chrome.
+
+4. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `apps/extension/dist`. Copy the generated extension ID shown by Chrome.
+
+5. Start the local API from PowerShell with the provider key and exact extension origin. Replace both placeholders; do not put the key in a browser bundle or commit it:
+
+   ```powershell
+   $env:OPENAI_API_KEY = 'your-server-side-key'
+   $env:ALLOWED_ORIGINS = 'chrome-extension://YOUR_EXTENSION_ID'
+   npm start -w @buddy/api
+   ```
+
+6. Open the [live Buddy Market Playground](https://buddy-webmcp-market.engrtitooo.chatgpt.site/). Buddy should wake up and describe the available capabilities.
+
+7. Enter this exact prompt in Buddy:
+
+   > Find me a gift under $50 that arrives before Thursday. Compare the best options, but don't buy anything without asking me.
+
+8. Expected result: Buddy uses structured search/filter/compare actions, the marketplace UI visibly updates, Activity records readable steps, and Buddy pauses at an approval card before a consequential cart or checkout action. Cancel once to prove nothing executes, then repeat and approve once.
+
+The project owner can instead build against the deployed Railway API by setting `BUDDY_API_BASE_URL` and running the production extension build documented in [PRODUCTION.md](./PRODUCTION.md). That API must allow the exact generated `chrome-extension://` origin; a production API URL alone is not zero-setup access.
+
 ## Run locally
 
 Prerequisites: Node.js 22+ and Chrome 149+ for native WebMCP testing.
@@ -106,8 +167,11 @@ Its static content script runs on HTTP(S) pages but renders nothing until tools 
 
 The extension's `ExtensionAgentProvider` sends typed messages to its service worker, which calls `apps/api`. The browser adapter first converts native `RegisteredTool` handles into a strict JSON-only contract: `window`, functions, prototypes, cycles, unknown properties, and browser objects never cross the boundary. The proxy uses the OpenAI Responses API with strict Structured Outputs, defaults to `gpt-5.6-luna`, adds timeouts/request IDs, and sets `store: false`. Its model-facing response is one fixed closed object with `kind`, `toolName`, `argsJson`, `label`, `reason`, and `message`. The model may return a conversational `final` or `needs_input` response without calling a tool. It never supplies executable argument objects, risk, or call IDs. The server parses `argsJson`, requires a plain object, validates it against the exact current WebMCP schema with a bounded interpreter that does not use `eval`/`new Function`, recomputes risk, and generates the call ID locally. Invalid proposals receive one bounded repair opportunity and are never executed. An incompatible site schema disables only its own tool.
 
-```bash
-cp .env.example .env
+Set the server environment in the shell (or use your process manager's environment support), then build and start the API:
+
+```powershell
+$env:OPENAI_API_KEY = 'your-server-side-key'
+$env:ALLOWED_ORIGINS = 'http://localhost:5173,chrome-extension://YOUR_EXTENSION_ID'
 npm run build -w @buddy/api
 npm start -w @buddy/api
 ```
@@ -146,13 +210,16 @@ Buddy sends no full webpage content. The agent receives only a bounded goal, min
 
 ## Demo walkthrough
 
-1. Visit an ordinary site: Buddy is not rendered.
-2. Open Buddy Market: Buddy wakes and announces available capabilities.
+1. Open an ordinary website—Buddy remains invisible.
+2. Open Buddy Market—Buddy detects WebMCP and wakes up.
 3. Enter: “Find me a gift under $50 that arrives before Thursday. Compare the best options, but don't buy anything without asking me.”
-4. Watch Buddy search, filter, and compare while the product grid updates.
-5. Buddy pauses before `add_to_cart`; inspect the clear approval card.
-6. Cancel to prove no action occurs, or approve once to resume and update the cart.
-7. Open Activity to show the human-readable trail; optionally enable Developer Mode to reveal underlying tool names.
+4. Watch Buddy use structured search, filter, and comparison actions.
+5. Observe the marketplace UI change as those WebMCP actions execute.
+6. Open Activity to inspect the human-readable execution history.
+7. Continue to a consequential action and inspect the approval card.
+8. Cancel once to demonstrate that nothing executes.
+9. Repeat the action and choose **Approve once**.
+10. Confirm the updated cart or result; optionally demonstrate Voice Mode and Developer Mode.
 
 ## Deployment
 
