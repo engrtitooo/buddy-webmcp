@@ -83,7 +83,7 @@ packages/
 
 Full decisions are documented in [ARCHITECTURE.md](./ARCHITECTURE.md), the threat model in [SECURITY.md](./SECURITY.md), and the submission story in [HACKATHON.md](./HACKATHON.md).
 
-## Judge Quick Start
+## Quick Start
 
 This is the shortest fully supported local-extension path. It uses the real OpenAI-backed agent, so an API key is required and remains server-side.
 
@@ -237,7 +237,6 @@ The Playground is a static Vite app. After `npm run build -w @buddy/playground`,
 
 - `docs/screenshots/playground.png` — add after final hosted capture
 - `docs/screenshots/approval.png` — add after final hosted capture
-- `docs/screenshots/arabic-rtl.png` — add after final hosted capture
 
 ## Hackathon
 
