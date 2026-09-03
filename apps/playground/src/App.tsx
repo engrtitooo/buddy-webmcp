@@ -29,6 +29,31 @@ const demoPrompt =
 
 const githubBase = 'https://github.com/engrtitooo/buddy-webmcp';
 
+const capabilityLabels = ['Search', 'Details', 'Filter', 'Compare', 'Cart', 'Delivery', 'Checkout'];
+
+const judgeDemoSteps = [
+  {
+    title: 'Open Buddy Market',
+    body: "Buddy automatically detects the site's WebMCP capabilities.",
+  },
+  {
+    title: 'Ask Buddy',
+    body: 'Give Buddy the goal below through text or voice.',
+  },
+  {
+    title: 'Watch structured actions',
+    body: 'Buddy searches, filters, compares, and updates the market through WebMCP tools.',
+  },
+  {
+    title: 'See the safety boundary',
+    body: 'Buddy pauses and requests approval before a consequential action.',
+  },
+  {
+    title: 'Approve or cancel',
+    body: 'Cancel proves nothing executes without permission. Approve once to continue.',
+  },
+];
+
 function BuddyMark({ asleep = false }: { asleep?: boolean }) {
   return (
     <span className={`brand-mark${asleep ? ' asleep' : ''}`} aria-hidden="true">
@@ -52,13 +77,13 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
     item: products.find((product) => product.id === id)!,
     quantity,
   }));
+  const cartCount = Object.values(state.cart).reduce((sum, quantity) => sum + quantity, 0);
   const total = cartRows.reduce((sum, row) => sum + row.item.price * row.quantity, 0);
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     applyFilters(query, {});
     market.set({ lastAction: `Showing results for “${query}”` });
   };
-
   return (
     <div className="market-app">
       <a className="skip-link" href="#main-content">
@@ -77,10 +102,15 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
           <a href="#safety">Safety</a>
           <a href="#playground">Playground</a>
         </nav>
-        <button className="cart-button" type="button" onClick={() => setCartOpen(true)}>
+        <button
+          className="cart-button"
+          type="button"
+          onClick={() => setCartOpen(true)}
+          aria-label={`Open demo cart, ${cartCount} ${cartCount === 1 ? 'item' : 'items'}`}
+        >
           <ShoppingBag />
           <span>Demo cart</span>
-          <b>{Object.values(state.cart).reduce((a, b) => a + b, 0)}</b>
+          <b>{cartCount}</b>
         </button>
       </header>
 
@@ -92,25 +122,27 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
               The friendly interface for the <em>agentic web.</em>
             </h1>
             <p className="hero-lead">
-              Buddy is a Chrome companion that wakes up when a website supports WebMCP, understands
-              what the site can do, and helps you complete goals naturally through text or
-              voice—while keeping you in control of consequential actions.
+              Buddy is a universal Chrome companion for WebMCP-enabled websites. It discovers what
+              each site can do, turns text or voice goals into structured actions, and asks before
+              anything consequential.
             </p>
             <div className="hero-actions">
-              <a className="button primary" href="#playground">
-                Try Buddy on this playground <ArrowRight />
+              <a className="button primary" href="#judge-demo">
+                Try the 60-second demo <ArrowRight />
               </a>
               <a className="button secondary" href="#how-buddy-works">
-                How Buddy works <ArrowDown />
+                See how Buddy uses WebMCP <ArrowDown />
               </a>
             </div>
             <p className="product-line">
               WebMCP gives websites capabilities.{' '}
               <strong>Buddy gives those capabilities a face, a voice, and your rules.</strong>
             </p>
-            <span className="playground-label">
-              Live WebMCP Playground · Simulated marketplace · No real purchases
-            </span>
+            <p className="hero-context">
+              <strong>Buddy is the Chrome companion.</strong> Buddy Market is only the safe WebMCP
+              playground used to demonstrate it.
+            </p>
+            <span className="playground-label">Simulated marketplace · No real purchases</span>
           </div>
 
           <div className="companion-story" aria-label="How Buddy responds across the web">
@@ -181,6 +213,46 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
         </section>
 
         <section
+          className="problem-section section-shell"
+          id="why-buddy"
+          aria-labelledby="problem-title"
+        >
+          <div className="problem-heading">
+            <span className="overline">WHY BUDDY EXISTS</span>
+            <h2 id="problem-title">
+              Agents can use WebMCP. People shouldn&apos;t need to understand WebMCP.
+            </h2>
+          </div>
+          <div className="contrast-grid">
+            <article className="without-buddy">
+              <span className="contrast-label">
+                <X /> Without Buddy
+              </span>
+              <ul>
+                <li>Raw tools and schemas</li>
+                <li>Different interfaces on every website</li>
+                <li>Unclear agent actions</li>
+                <li>Too much technical detail for users</li>
+              </ul>
+            </article>
+            <article className="with-buddy">
+              <span className="contrast-label">
+                <Check /> With Buddy
+              </span>
+              <ul>
+                <li>One consistent companion</li>
+                <li>Natural text or voice goals</li>
+                <li>Human-readable capabilities</li>
+                <li>Visible activity and personal approval rules</li>
+              </ul>
+            </article>
+          </div>
+          <p className="impact-line">
+            Buddy makes the agentic web usable by everyday people, not just developers.
+          </p>
+        </section>
+
+        <section
           className="how-section section-shell"
           id="how-buddy-works"
           aria-labelledby="how-title"
@@ -233,7 +305,7 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
           </div>
         </section>
 
-        <section className="layer-section" id="why-buddy" aria-labelledby="why-title">
+        <section className="layer-section" id="human-interface-layer" aria-labelledby="why-title">
           <div className="layer-copy">
             <span className="overline">WHY BUDDY?</span>
             <h2 id="why-title">
@@ -338,42 +410,101 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
           </div>
         </section>
 
+        <section className="judge-demo" id="judge-demo" aria-labelledby="judge-demo-title">
+          <div className="judge-demo-inner">
+            <div className="judge-demo-copy">
+              <span className="overline">LIVE PROOF IN FIVE STEPS</span>
+              <h2 id="judge-demo-title">60-second judge demo</h2>
+              <p>
+                One prompt shows discovery, structured execution, and Buddy&apos;s safety boundary.
+              </p>
+              <div className="demo-identity" aria-label="Product and demo distinction">
+                <p>
+                  <strong>Buddy</strong>
+                  <span>The Chrome companion</span>
+                </p>
+                <p>
+                  <strong>Buddy Market</strong>
+                  <span>The controlled WebMCP demo</span>
+                </p>
+              </div>
+              <div className="judge-prompt">
+                <span>ASK BUDDY</span>
+                <q>{demoPrompt}</q>
+                <small>Use text or press Buddy&apos;s voice button.</small>
+              </div>
+              <p className="demo-safety-note">
+                <ShieldCheck /> No real purchases or payments occur.
+              </p>
+            </div>
+            <ol className="judge-steps">
+              {judgeDemoSteps.map((step, index) => (
+                <li key={step.title}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{step.title}</strong>
+                    <p>{step.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
+
         <section className="playground-intro" id="playground" aria-labelledby="playground-title">
           <div className="playground-heading">
             <span className="overline">BUDDY MARKET · CONTROLLED DEMO</span>
-            <h2 id="playground-title">Try Buddy on a real WebMCP playground</h2>
+            <h2 id="playground-title">Buddy Market: the controlled WebMCP demo</h2>
             <p>
-              Buddy Market is a simulated marketplace built specifically to demonstrate discovery,
-              structured WebMCP execution, comparisons, cart actions, approvals, and safe simulated
-              checkout. No real transactions occur.
+              Buddy is the portable Chrome companion. This simulated marketplace is the safe
+              environment for demonstrating its discovery, execution, comparison, cart, and approval
+              experience.
             </p>
           </div>
           <div className="playground-panels">
-            <article className="demo-prompt-card">
+            <article className="demo-scope-card">
               <div className="mini-buddy">
                 <span className="mini-face">
                   <i />
                   <i />
                 </span>
               </div>
-              <span className="overline">PASTE THIS INTO BUDDY</span>
-              <blockquote>“{demoPrompt}”</blockquote>
-              <small>Use text or press Buddy’s voice button.</small>
+              <span className="overline">PRODUCT VS. PLAYGROUND</span>
+              <h3>Buddy travels with you.</h3>
+              <p>
+                Buddy Market stays here as a controlled site that intentionally exposes safe demo
+                capabilities.
+              </p>
+              <small>No real purchases or payments occur.</small>
             </article>
             <div
               className={`webmcp-status ${webmcpSupported ? 'ready' : 'needs-flag'}`}
               role="status"
             >
               {webmcpSupported ? <Check /> : <CircleAlert />}
-              <div>
-                <strong>
+              <div className="status-copy">
+                <strong className="status-title">
                   {webmcpSupported ? 'WebMCP detected' : "WebMCP isn't enabled in this browser"}
                 </strong>
-                <span>
+                <span className="status-detail">
                   {webmcpSupported
-                    ? 'Buddy can discover 10 structured actions on this playground.'
-                    : 'Use Chrome 149+ and enable the WebMCP testing flag where required.'}
+                    ? 'Buddy can discover and use this site’s intentionally exposed capabilities.'
+                    : 'Enable WebMCP in a supported Chrome build to let Buddy discover these tools.'}
                 </span>
+                <div className="capability-summary">
+                  <b>10 live WebMCP tools</b>
+                  <div className="capability-chips" aria-label="WebMCP capabilities">
+                    {capabilityLabels.map((label) => (
+                      <span key={label}>{label}</span>
+                    ))}
+                  </div>
+                </div>
+                <p className="webmcp-difference">
+                  <Braces /> Structured WebMCP actions — not DOM scraping or selector automation.
+                </p>
+                <small>
+                  Buddy executes only capabilities intentionally exposed by the website.
+                </small>
               </div>
             </div>
           </div>
