@@ -200,6 +200,17 @@ describe('BuddyApp integration', () => {
     expect(developer.textContent).toContain('HTTP 400'); expect(developer.textContent).toContain('INVALID_TOOL_SCHEMA'); expect(developer.textContent).toContain('tool_schema'); expect(developer.textContent).toContain('request-safe-id');
   });
 
+  it('shows one clean user-facing message for a genuine WebMCP execution failure', async () => {
+    const call = { kind: 'tool_call', toolName: 'search_items', args: { query: 'gift' }, label: 'Search', reason: 'Find', risk: 'READ' };
+    const adapter = new FakeAdapter([searchTool]); adapter.execute.mockRejectedValueOnce(new Error('Failed to parse private tool details'));
+    const container = await renderBuddy(adapter, new QueueProvider([call])); await submitGoal(container);
+    expect(container.textContent?.match(/That site action could not be completed, so Buddy stopped safely\./g)).toHaveLength(1);
+    expect(container.textContent).not.toContain('Failed to parse private tool details');
+    await click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Activity')) ?? null);
+    expect(container.textContent).not.toContain('Failed to parse private tool details');
+    expect(adapter.execute).toHaveBeenCalledTimes(1);
+  });
+
   it('reviews voice transcripts by default and auto-sends only when configured', async () => {
     const speech: SpeechToTextProvider = { supported: true, listen: vi.fn(async () => 'Find headphones'), stop: vi.fn() };
     const reviewProvider = new QueueProvider([]); const review = await renderBuddy(new FakeAdapter([searchTool]), reviewProvider, { speech });

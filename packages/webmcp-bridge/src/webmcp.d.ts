@@ -6,7 +6,7 @@ interface WebMCPToolDefinition { name: string; title?: string; description: stri
 interface ModelContext extends EventTarget {
   registerTool(tool: WebMCPToolDefinition, options?: { signal?: AbortSignal; exposedTo?: string[] }): Promise<void>;
   getTools(options?: { fromOrigins?: string[] }): Promise<WebMCPRegisteredTool[]>;
-  executeTool(tool: WebMCPRegisteredTool, input?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<string>;
+  executeTool(tool: WebMCPRegisteredTool, input?: string | Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
   ontoolchange: ((event: Event) => void) | null;
 }
 interface Document { readonly modelContext?: ModelContext }

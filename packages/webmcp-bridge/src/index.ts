@@ -7,11 +7,23 @@ export interface BrowserToolDefinition { name: string; title?: string; descripti
 export interface BrowserModelContext extends EventTarget {
   registerTool(tool: BrowserToolDefinition, options?: { signal?: AbortSignal; exposedTo?: string[] }): Promise<void>;
   getTools(options?: { fromOrigins?: string[] }): Promise<BrowserRegisteredTool[]>;
-  executeTool(tool: BrowserRegisteredTool, input?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<string>;
+  executeTool(tool: BrowserRegisteredTool, input?: string | Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
 }
 declare global { interface Document { readonly modelContext?: BrowserModelContext } }
 
 export type ToolChangeListener = (tools: WebMCPTool[]) => void;
+
+/**
+ * Chrome's string-input error and Web IDL signature errors happen before the
+ * registered tool is invoked. Keep this allowlist deliberately narrow: an
+ * arbitrary tool failure must never cause a second execution.
+ */
+function isArgumentRepresentationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.trim();
+  if (message === 'Failed to parse input arguments') return true;
+  return /^Failed to execute ['"]executeTool['"] on ['"]ModelContext['"]: (?:parameter|argument) 2 is not of type ['"]?(?:object|record)['"]?\.?$/i.test(message);
+}
 
 /**
  * The single boundary from browser-owned RegisteredTool handles to Buddy's
@@ -91,7 +103,15 @@ export class WebMCPAdapter {
     if (!context || !tool) throw new Error('The selected site action is no longer available.');
     const timeout = AbortSignal.timeout(30_000);
     const executionSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const raw = await context.executeTool(tool, args, { signal: executionSignal });
+    const serializedArgs = JSON.stringify(args);
+    let raw: unknown;
+    try {
+      raw = await context.executeTool(tool, serializedArgs, { signal: executionSignal });
+    } catch (error) {
+      if (!isArgumentRepresentationError(error)) throw error;
+      console.debug('[Buddy] WebMCP executeTool argument compatibility fallback');
+      raw = await context.executeTool(tool, args, { signal: executionSignal });
+    }
     if (typeof raw !== 'string') return raw;
     try { return JSON.parse(raw) as unknown; } catch { return raw; }
   }

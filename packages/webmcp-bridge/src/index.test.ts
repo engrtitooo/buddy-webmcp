@@ -21,6 +21,42 @@ describe('WebMCPAdapter', () => {
     expect((await adapter.getTools())[0]?.name).toBe('search');
     expect(await adapter.execute('search', {})).toEqual({ count: 2 });
   });
+  it('serializes current Chrome inputs exactly once at the execution boundary', async () => {
+    const adapter = new WebMCPAdapter(); await adapter.getTools();
+    const args = { query: 'skincare and makeup gift under $200' };
+    await adapter.execute('search', args);
+    expect(context.executeTool).toHaveBeenCalledWith(tools[0], '{"query":"skincare and makeup gift under $200"}', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+  it('preserves nested input structure when serializing for Chrome', async () => {
+    const adapter = new WebMCPAdapter(); await adapter.getTools();
+    const args = { catalog: { query: 'skincare and makeup gift', maxPrice: 200 } };
+    await adapter.execute('search', args);
+    expect(context.executeTool).toHaveBeenCalledWith(tools[0], '{"catalog":{"query":"skincare and makeup gift","maxPrice":200}}', expect.anything());
+  });
+  it('keeps parsing JSON string results returned by Chrome', async () => {
+    context.executeTool = vi.fn().mockResolvedValue('{"items":[{"id":"1"}]}');
+    const adapter = new WebMCPAdapter(); await adapter.getTools();
+    await expect(adapter.execute('search', { query: 'skincare' })).resolves.toEqual({ items: [{ id: '1' }] });
+  });
+  it('falls back to structured input only for a browser invocation-shape rejection', async () => {
+    const diagnostic = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    context.executeTool = vi.fn()
+      .mockRejectedValueOnce(new TypeError("Failed to execute 'executeTool' on 'ModelContext': parameter 2 is not of type 'object'."))
+      .mockResolvedValueOnce({ count: 2 });
+    const adapter = new WebMCPAdapter(); await adapter.getTools();
+    const args = { query: 'skincare' };
+    await expect(adapter.execute('search', args)).resolves.toEqual({ count: 2 });
+    expect(context.executeTool).toHaveBeenNthCalledWith(1, tools[0], '{"query":"skincare"}', expect.anything());
+    expect(context.executeTool).toHaveBeenNthCalledWith(2, tools[0], args, expect.anything());
+    expect(diagnostic).toHaveBeenCalledWith('[Buddy] WebMCP executeTool argument compatibility fallback');
+  });
+  it('never retries a genuine tool failure after execution', async () => {
+    tools = [{ name: 'add_to_cart', description: 'Add an item to the cart', origin: 'https://example.com', window }];
+    context.executeTool = vi.fn().mockRejectedValue(new Error('Inventory changed after execution'));
+    const adapter = new WebMCPAdapter(); await adapter.getTools();
+    await expect(adapter.execute('add_to_cart', { id: '1' })).rejects.toThrow('Inventory changed after execution');
+    expect(context.executeTool).toHaveBeenCalledTimes(1);
+  });
   it('notifies when toolchange actually changes the advertised inventory', async () => {
     const adapter = new WebMCPAdapter(); await adapter.getTools(); const callback = vi.fn(); cleanups.push(adapter.subscribe(callback));
     tools = [...tools, { name: 'compare', description: 'Compare', origin: 'https://example.com', window }];
@@ -37,7 +73,7 @@ describe('WebMCPAdapter', () => {
     tools = [{ ...reviewedHandle }]; await adapter.getTools();
     expect(adapter.getRevision()).toBe(reviewedRevision);
     await adapter.execute('search', {}, undefined, reviewedRevision);
-    expect(context.executeTool).toHaveBeenCalledWith(reviewedHandle, {}, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(context.executeTool).toHaveBeenCalledWith(reviewedHandle, '{}', expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
   it('rejects execution after the advertised tool set changes', async () => {
     const adapter = new WebMCPAdapter(); await adapter.getTools(); const reviewedRevision = adapter.getRevision();

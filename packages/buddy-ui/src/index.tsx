@@ -16,6 +16,13 @@ export interface StoredSettings { locale: Locale | 'auto'; muted: boolean; theme
 type ToolCall = Extract<AgentDecision, { kind: 'tool_call' }>;
 interface RunContext { id: number; sessionId: string; goal: string; expectedRevision: number; nextTurn: number; observations: AgentObservation[]; guard: RepeatedToolCallGuard; repairAttempts: Map<string, number>; controller: AbortController; pending: ToolCall | undefined; lastDecision?: AgentDecision['kind']; lastTool?: string; convergenceReason?: string; voice: { resolve: (result: VoiceToolResult) => void; controls: VoiceToolControls } | undefined }
 
+class SiteActionExecutionError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'The site could not complete that action.', { cause });
+    this.name = 'SiteActionExecutionError';
+  }
+}
+
 export interface BuddyAdapter {
   isSupported(): boolean;
   getTools(): Promise<WebMCPTool[]>;
@@ -288,8 +295,8 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
     } catch (error) {
       if (run.controller.signal.aborted) throw error;
       const text = error instanceof Error ? error.message : 'The site could not complete that action.';
-      updateActivity(call.callId, { status: 'failed', detail: text }); run.observations.push({ callId: call.callId, toolName: call.toolName, args: call.args, outcome: 'error', error: text });
-      setState('ERROR'); if (!run.voice) addMessage('assistant', `${text} I stopped safely.`); throw error;
+      updateActivity(call.callId, { status: 'failed', detail: 'That site action could not be completed.', technical: { tool: call.toolName, durationMs: Math.round(performance.now() - started), request: call.args, response: text } }); run.observations.push({ callId: call.callId, toolName: call.toolName, args: call.args, outcome: 'error', error: text });
+      setState('ERROR'); throw new SiteActionExecutionError(error);
     }
   };
 
@@ -365,8 +372,12 @@ export function BuddyApp({ adapter, provider = new MockAgentProvider(), realtime
     } catch (error) {
       if (!run.controller.signal.aborted) {
         setState('ERROR');
+        const siteActionFailed = error instanceof SiteActionExecutionError;
         const suffix = settings.developerMode ? developerErrorSuffix(error) : '';
-        const message = `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'}${suffix} No further action was taken.`;
+        const technical = siteActionFailed && settings.developerMode ? ` [${error.message}]` : '';
+        const message = siteActionFailed
+          ? `That site action could not be completed, so Buddy stopped safely.${technical}`
+          : `${error instanceof Error ? error.message : 'The agent stopped unexpectedly.'}${suffix} No further action was taken.`;
         if (run.voice) { run.voice.resolve({ status: 'failed', message }); run.voice = undefined; } else addMessage('assistant', message);
       }
       stopRun(run);
