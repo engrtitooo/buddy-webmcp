@@ -541,11 +541,11 @@ export function App({ webmcpSupported }: { webmcpSupported: boolean }) {
         <section className="catalog" id="catalog" aria-labelledby="catalog-title">
           <div className="section-head">
             <div>
-              <span className="overline">LIVE DEMO CATALOG</span>
+              <span className="overline">INTERACTIVE WEBMCP CATALOG</span>
               <h2 id="catalog-title">
                 {state.query
                   ? `Results for “${state.query}”`
-                  : 'Small things, thoughtfully chosen.'}
+                  : 'Products Buddy can search, filter, and compare.'}
               </h2>
               <p>
                 {visible.length} items · {state.lastAction}
