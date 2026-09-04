@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AGENT_LIMITS, type AgentNextInput } from '@buddy/shared';
+import { AGENT_LIMITS, SITE_SCOPE_INSTRUCTIONS, type AgentNextInput } from '@buddy/shared';
 import { OPENAI_DECISION_SCHEMA, normalizeOpenAIModelDecision } from './openai';
 import { MemoryRateLimiter, RequestError, assertProductionEnvironment, createBuddyServer, parseAgentNextInput } from './server';
 import { createRealtimeSessionConfig, realtimeConfig, validateRealtimeSdp } from './realtime';
@@ -131,6 +131,7 @@ describe('Buddy API', () => {
     const response = await fetch(`${base}/agent/next`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ kind: 'tool_call', toolName: 'search', risk: 'READ' });
     expect(providerBody).toMatchObject({ model: 'gpt-5.6-luna', store: false, text: { format: { type: 'json_schema', strict: true } } });
+    expect(providerBody?.instructions).toContain(SITE_SCOPE_INSTRUCTIONS);
     const format = ((providerBody?.text as Record<string, unknown>).format as Record<string, unknown>);
     const schema = format.schema as Record<string, unknown>;
     expect(format.type).toBe('json_schema'); expect(format.strict).toBe(true);
@@ -246,6 +247,7 @@ describe('Buddy Realtime bootstrap', () => {
     expect(response.headers.get('x-buddy-realtime-model')).toBe('gpt-realtime-2.1'); expect(response.headers.get('x-buddy-realtime-voice')).toBe('marin');
     expect(providerForm?.get('sdp')).toBe(offer);
     const session = JSON.parse(String(providerForm?.get('session'))) as Record<string, unknown>;
+    expect(session.instructions).toContain(SITE_SCOPE_INSTRUCTIONS);
     expect(session).toMatchObject({ model: 'gpt-realtime-2.1', audio: { output: { voice: 'marin' } } }); expect(JSON.stringify(session)).toContain('Spanish');
     expect(providerHeaders?.get('authorization')).toBe('Bearer server-secret');
     expect(providerHeaders?.get('openai-safety-identifier')).toMatch(/^[a-f0-9]{64}$/);

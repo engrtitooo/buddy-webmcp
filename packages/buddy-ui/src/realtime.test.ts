@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentServiceError } from '@buddy/shared';
-import { RealtimeVoiceClient, microphoneConstraints, parseBuddyToolRequest, type RealtimeSessionProvider, type RealtimeVoiceState, type VoiceTranscriptUpdate } from './realtime';
+import { AgentServiceError, SITE_SCOPE_INSTRUCTIONS } from '@buddy/shared';
+import { RealtimeVoiceClient, microphoneConstraints, parseBuddyToolRequest, type RealtimeSessionProvider, type RealtimeVoiceState, type VoiceToolControls, type VoiceToolResult, type VoiceTranscriptUpdate } from './realtime';
 
 class FakeTrack {
   stop = vi.fn();
@@ -139,6 +139,28 @@ describe('RealtimeVoiceClient', () => {
     expect(sent).toContainEqual(expect.objectContaining({ type: 'conversation.item.create', item: expect.objectContaining({ type: 'function_call_output', call_id: 'call-1' }) }));
     channel?.message({ type: 'response.output_item.done', item: { type: 'function_call', name: 'executeTool', call_id: 'call-2', arguments: '{}' } });
     expect(subject.onToolRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves website scope in the spoken approval reminder and waits for the existing approval flow', async () => {
+    let complete!: (result: VoiceToolResult) => void;
+    const pending = new Promise<VoiceToolResult>((resolve) => { complete = resolve; });
+    const onToolRequest = vi.fn((_request: string, controls: VoiceToolControls) => {
+      controls.announceApprovalRequired();
+      return pending;
+    });
+    const subject = harness({ onToolRequest });
+    await startAndOpen(subject);
+    const channel = subject.peers[0]!.channel;
+    channel.message({ type: 'response.output_item.done', item: { type: 'function_call', name: 'buddy_webmcp_request', call_id: 'approval-1', arguments: '{"request":"Add those headphones to my cart"}' } });
+    expect(subject.client.currentState).toBe('WAITING_FOR_APPROVAL');
+    const reminder = channel.sent.map((value) => JSON.parse(value)).find((event) => event.type === 'response.create');
+    expect(reminder.response.instructions).toContain(SITE_SCOPE_INSTRUCTIONS);
+    expect(reminder.response.instructions).toContain('visible Approve or Cancel buttons');
+    expect(reminder.response.instructions).toContain('Do not treat spoken approval as authorization');
+    expect(channel.sent.some((value) => JSON.parse(value).type === 'conversation.item.create')).toBe(false);
+    complete({ status: 'canceled', message: 'Canceled. I did not perform that action.' });
+    await vi.waitFor(() => expect(channel.sent.map((value) => JSON.parse(value))).toContainEqual(expect.objectContaining({ type: 'conversation.item.create', item: expect.objectContaining({ call_id: 'approval-1' }) })));
+    subject.client.stop();
   });
 
   it('closes the channel, peer, remote audio, and every microphone track', async () => {

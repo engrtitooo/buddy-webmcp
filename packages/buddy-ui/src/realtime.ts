@@ -1,4 +1,4 @@
-import { AgentServiceError, type Locale } from '@buddy/shared';
+import { AgentServiceError, SITE_SCOPE_INSTRUCTIONS, type Locale } from '@buddy/shared';
 
 export type RealtimeVoiceState =
   | 'IDLE'
@@ -344,7 +344,7 @@ export class RealtimeVoiceClient {
         result = await this.options.onToolRequest(request, {
           announceApprovalRequired: () => {
             this.setState('WAITING_FOR_APPROVAL');
-            this.send({ type: 'response.create', response: { output_modalities: ['audio'], instructions: 'Briefly say that you can do this, but the user must confirm with the visible Approve or Cancel buttons. Do not treat spoken approval as authorization.' } });
+            this.send({ type: 'response.create', response: { output_modalities: ['audio'], instructions: `${SITE_SCOPE_INSTRUCTIONS} Briefly say that you can do this, but the user must confirm with the visible Approve or Cancel buttons. Do not treat spoken approval as authorization.` } });
           },
         });
       } catch { result = { status: 'failed', message: 'Buddy stopped safely before the site action completed.' }; }

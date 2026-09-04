@@ -1,3 +1,5 @@
+export { SITE_SCOPE_INSTRUCTIONS, SITE_SCOPE_REFUSAL } from './site-scope';
+
 export type RiskCategory =
   | 'READ'
   | 'LOW_RISK_WRITE'

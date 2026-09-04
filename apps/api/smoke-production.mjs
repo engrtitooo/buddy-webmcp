@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { resolveApiUrl } from '../extension/build.mjs';
 
-// An opt-in live check: one synthetic text turn and one SDP bootstrap. No tools,
+// An opt-in live check: five synthetic text turns and one SDP bootstrap. No tools,
 // microphone, audio, provider key, or browser credentials are used by this script.
 const base = resolveApiUrl(true).href.replace(/\/$/, '');
 const expectedCommit = process.argv.find((argument) => argument.startsWith('--expected-commit='))?.split('=')[1];
@@ -21,6 +21,42 @@ function report(path, response, extra = {}) {
 
 function requireStatus(response, status, path) {
   if (response.status !== status) throw new Error(`${path}: expected HTTP ${status}, received ${response.status}; request ${safeId(response.headers.get('x-request-id')) ?? 'unknown'}`);
+}
+
+async function checkSiteScope() {
+  const tool = {
+    name: 'search_catalog', description: 'Search a synthetic product catalog.', origin: 'https://smoke.invalid',
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false },
+  };
+  const refusal = 'I can only help with this website and its available WebMCP capabilities.';
+  async function decide(goal, check, context = {}) {
+    const response = await request('/agent/next', {
+      method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: randomUUID(), turn: 0, goal, tools: [tool], observations: [], ...context }),
+    });
+    requireStatus(response, 200, '/agent/next');
+    const decision = await response.json();
+    report('/agent/next', response, { check, decisionKind: decision.kind });
+    return decision;
+  }
+
+  const action = await decide('Search the catalog for headphones using search_catalog.', 'valid-site-request');
+  if (action.kind !== 'tool_call' || action.toolName !== tool.name || !/headphones/i.test(action.args?.query ?? '')) throw new Error('/agent/next: valid site request did not select the advertised search.');
+  // Inspect the proposed action only; never execute a site tool.
+
+  const capabilities = await decide('What can you do on this website? Answer from the available capabilities.', 'capability-question');
+  if (capabilities.kind !== 'final' || typeof capabilities.message !== 'string' || !/search/i.test(capabilities.message) || !/catalog|products/i.test(capabilities.message)) throw new Error('/agent/next: capability question did not receive a direct site-related answer.');
+
+  const observations = [{ callId: 'search-result', toolName: tool.name, args: action.args, outcome: 'success', result: { items: [{ name: 'Studio Headphones', price: 49, currency: 'USD' }] } }];
+  const followUp = await decide('How much does that result cost?', 'tool-result-follow-up', { turn: 1, observations });
+  if (followUp.kind !== 'final' || typeof followUp.message !== 'string' || !/49|forty[- ]nine/i.test(followUp.message)) throw new Error('/agent/next: tool-result follow-up was not answered directly from the supplied result.');
+
+  for (const context of [{}, { turn: 1, observations }]) {
+    const unrelated = await decide('What is the capital of France?', context.turn ? 'refusal-after-site-result' : 'unrelated-question-refusal', context);
+    if (unrelated.kind !== 'final' || unrelated.message !== refusal) throw new Error('/agent/next: unrelated question did not receive only the scope refusal.');
+  }
+  console.log('Website scope checks passed: site action, capabilities, result follow-up, and unrelated-question refusals.');
 }
 
 async function main() {
@@ -44,14 +80,7 @@ async function main() {
   }
   console.log('Both routes accept independent Chrome IDs and reject arbitrary web, null, and originless callers.');
 
-  const agent = await request('/agent/next', {
-    method: 'POST', headers: { origin, 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: randomUUID(), turn: 0, goal: 'Reply briefly that you are ready. Do not request or execute any tools.', tools: [], observations: [] }),
-  });
-  requireStatus(agent, 200, '/agent/next');
-  const decision = await agent.json();
-  if (!['final', 'needs_input'].includes(decision.kind) || typeof decision.message !== 'string') throw new Error('/agent/next: unexpected decision shape.');
-  report('/agent/next', agent, { decisionKind: decision.kind });
+  await checkSiteScope();
 
   // A standards-shaped synthetic offer verifies server/provider negotiation only.
   // There is no peer or media stream; this does not test microphone or playback.
