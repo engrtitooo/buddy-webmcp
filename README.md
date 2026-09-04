@@ -227,11 +227,6 @@ The Playground is a static Vite app. After `npm run build -w @buddy/playground`,
 - Cross-site workflows, encrypted sync, spending limits, site trust scores, and temporary grants are deliberately future work.
 - Automated native-WebMCP E2E still requires a compatible Chrome binary with WebMCP enabled. Deterministic React integration tests cover detection, tool changes, execution, approval, cancellation, repair, voice, RTL, dragging, malicious text, and reduced motion without depending on that external browser setup.
 
-## Screenshots
-
-- `docs/screenshots/playground.png` — add after final hosted capture
-- `docs/screenshots/approval.png` — add after final hosted capture
-
 ## Hackathon
 
 Built for the [WebMCP Hackathon](https://webmcp.devpost.com/). Buddy is not a chatbot with eyes and not a protocol inspector. It is a portable human interface for capabilities that websites intentionally expose.
